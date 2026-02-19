@@ -153,10 +153,14 @@ class BleManager(private val context: Context) {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    Log.i(TAG, "GATT connected — discovering services")
+                    Log.i(TAG, "GATT connected — requesting MTU 512")
                     _connectionState.value = BleConnectionState.CONNECTING
                     if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
-                        gatt.discoverServices()
+                        // Request a larger MTU before service discovery.
+                        // Default BLE MTU is 23 bytes (20 usable for notify).
+                        // The ESP32 JSON payload can exceed that easily.
+                        // onMtuChanged() will trigger discoverServices() once negotiated.
+                        gatt.requestMtu(512)
                     }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
@@ -164,6 +168,18 @@ class BleManager(private val context: Context) {
                     cleanupGatt()
                     if (isStarted) scheduleReconnect()
                 }
+            }
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.i(TAG, "MTU negotiated: $mtu bytes (payload: ${mtu - 3} bytes)")
+            } else {
+                Log.w(TAG, "MTU negotiation failed (status=$status) — continuing with default MTU")
+            }
+            // Always proceed to service discovery, whether MTU negotiation succeeded or not
+            if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+                gatt.discoverServices()
             }
         }
 
@@ -252,13 +268,15 @@ class BleManager(private val context: Context) {
 
     private fun parseNavData(bytes: ByteArray) {
         val json = bytes.toString(Charsets.UTF_8)
-        Log.v(TAG, "NavData raw: $json")
+        Log.d(TAG, "NavData received: ${bytes.size} bytes → $json")
         try {
             val data = gson.fromJson(json, NavData::class.java)
             _navData.value = data
             _lastDataTimestamp.value = System.currentTimeMillis()
+            Log.d(TAG, "NavData parsed OK: stw=${data.stw} depth=${data.depth} cog=${data.cog} sog=${data.sog}")
         } catch (e: JsonSyntaxException) {
-            Log.e(TAG, "JSON parse error: ${e.message}")
+            Log.e(TAG, "JSON parse error (${bytes.size} bytes, likely truncated by MTU): ${e.message}")
+            Log.e(TAG, "Raw bytes (hex): ${bytes.joinToString(" ") { "%02X".format(it) }}")
         }
     }
 

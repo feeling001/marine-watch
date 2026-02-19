@@ -49,14 +49,13 @@ dependencies {
     implementation 'androidx.wear:wear:1.3.0'
 
     // Compose for Wear OS
+    // Note: compose-navigation is intentionally excluded — it pulls
+    // androidx.navigation which conflicts with the Wear OS BOM versions.
+    // This app is single-screen and does not need navigation.
     implementation platform('androidx.compose:compose-bom:2024.02.00')
     implementation 'androidx.wear.compose:compose-material:1.3.0'
     implementation 'androidx.wear.compose:compose-foundation:1.3.0'
-    implementation 'androidx.wear.compose:compose-navigation:1.3.0'
     implementation 'androidx.activity:activity-compose:1.8.2'
-
-    // Ambient / always-on
-    implementation 'androidx.wear:wear:1.3.0'
 
     // Lifecycle & ViewModel
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
