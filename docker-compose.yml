@@ -1,0 +1,60 @@
+version: "3.8"
+
+# ============================================================
+# Docker Compose — Marine Watch APK builder
+#
+# Usage:
+#   docker compose run --rm build          # build debug APK
+#   docker compose run --rm build-release  # build release APK (unsigned)
+#   docker compose run --rm shell          # interactive shell
+# ============================================================
+
+services:
+
+  # ---------- Step 0: Generate gradle wrapper jar (run once) ----------
+  wrapper:
+    image: gradle:8.6-jdk17
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    command: gradle wrapper
+    profiles: ["setup"]
+
+  # ---------- Step 1: Build Docker image + debug APK ----------
+  build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/workspace
+      - gradle-cache:/root/.gradle
+    working_dir: /workspace
+    command: ./gradlew assembleDebug --stacktrace
+
+  # ---------- Step 2 (optional): Release APK ----------
+  build-release:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/workspace
+      - gradle-cache:/root/.gradle
+    working_dir: /workspace
+    command: ./gradlew assembleRelease --stacktrace
+
+  # ---------- Interactive shell for debugging ----------
+  shell:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/workspace
+      - gradle-cache:/root/.gradle
+    working_dir: /workspace
+    entrypoint: /bin/bash
+    stdin_open: true
+    tty: true
+
+volumes:
+  gradle-cache:
+    driver: local

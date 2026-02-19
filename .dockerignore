@@ -1,0 +1,59 @@
+# ============================================================
+# .dockerignore — Marine Watch Docker build context
+#
+# Keeps the build context small: only source files and Gradle
+# wrapper are needed inside the image. Everything else is
+# either generated at build time or irrelevant to the build.
+# ============================================================
+
+# ----------------------------------------------------------------
+# Build outputs (large, regenerated inside the container)
+# ----------------------------------------------------------------
+build/
+app/build/
+**/build/
+
+# ----------------------------------------------------------------
+# Gradle caches (managed by the named Docker volume)
+# ----------------------------------------------------------------
+.gradle/
+
+# ----------------------------------------------------------------
+# IDE project files
+# ----------------------------------------------------------------
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+captures/
+
+# ----------------------------------------------------------------
+# Signing files (keep out of the image for security)
+# ----------------------------------------------------------------
+*.jks
+*.keystore
+keystore.properties
+release-keystore.properties
+
+# ----------------------------------------------------------------
+# Docker files themselves (no need to copy into the image)
+# ----------------------------------------------------------------
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# ----------------------------------------------------------------
+# Documentation & assets not needed at compile time
+# ----------------------------------------------------------------
+README.md
+doc/
+*.md
+
+# ----------------------------------------------------------------
+# OS noise
+# ----------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.log
+*.tmp

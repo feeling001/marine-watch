@@ -1,0 +1,13 @@
+The gradle-wrapper.jar binary must be generated locally.
+
+Run ONE of these commands to generate it:
+
+Option A — if you have Gradle installed locally:
+    gradle wrapper --gradle-version 8.6
+
+Option B — via Docker (bootstrap container):
+    docker run --rm -v "$(pwd)":/workspace -w /workspace \
+        gradle:8.6-jdk17 gradle wrapper
+
+After running either command, the file gradle/wrapper/gradle-wrapper.jar
+will appear and the build will work normally.
