@@ -57,7 +57,13 @@ object BleConstants {
     // Timing
     // ----------------------------------------------------------------
 
-    /** Maximum acceptable data age before showing "stale" indicator (ms) */
+    /**
+     * After this delay with no new packet, data values turn yellow
+     * to warn the user that the information may be outdated.
+     */
+    const val DATA_WARN_THRESHOLD_MS = 5_000L
+
+    /** Maximum acceptable data age before showing "stale" overlay (ms) */
     const val DATA_STALE_THRESHOLD_MS = 15_000L
 
     /** Delay before retrying a failed BLE connection (ms) */

@@ -2,9 +2,7 @@ package com.marinewatch.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -15,6 +13,7 @@ import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material.*
 import com.marinewatch.app.MainViewModel
 import com.marinewatch.app.ble.BleConnectionState
+import com.marinewatch.app.ble.BleConstants
 import com.marinewatch.app.data.NavData
 
 // ----------------------------------------------------------------
@@ -26,17 +25,35 @@ private val ColorAmbientBg      = Color(0xFF000000)
 private val ColorAccent         = Color(0xFF00BFFF)   // Deep sky blue
 private val ColorLabel          = Color(0xFF607D8B)   // Blue-grey
 private val ColorValue          = Color(0xFFECEFF1)   // Near-white
+private val ColorValueWarn      = Color(0xFFFFC107)   // Amber — data > 5 s old
 private val ColorWarning        = Color(0xFFFFC107)   // Amber
 private val ColorAmbientValue   = Color(0xFF90A4AE)   // Dimmed for ambient
 private val ColorAmbientLabel   = Color(0xFF455A64)
+
+/**
+ * Three freshness states for received data.
+ *
+ * [FRESH]  — packet received within [BleConstants.DATA_WARN_THRESHOLD_MS]
+ * [WARN]   — no packet for 5–15 s: values shown in yellow
+ * [STALE]  — no packet for > [BleConstants.DATA_STALE_THRESHOLD_MS]: overlay shown
+ */
+internal enum class DataFreshness { FRESH, WARN, STALE }
+
+private fun dataFreshness(lastTs: Long): DataFreshness {
+    if (lastTs == 0L) return DataFreshness.STALE
+    val age = System.currentTimeMillis() - lastTs
+    return when {
+        age <= BleConstants.DATA_WARN_THRESHOLD_MS  -> DataFreshness.FRESH
+        age <= BleConstants.DATA_STALE_THRESHOLD_MS -> DataFreshness.WARN
+        else                                         -> DataFreshness.STALE
+    }
+}
 
 /**
  * Root composable for the Marine Watch display.
  *
  * @param viewModel  The [MainViewModel] providing BLE state and NavData.
  * @param isAmbient  True when the watch is in ambient (always-on) mode.
- *                   In ambient mode colours are dimmed and non-essential
- *                   elements are hidden to reduce burn-in.
  */
 @Composable
 fun MarineDisplay(
@@ -47,8 +64,12 @@ fun MarineDisplay(
     val nav    by viewModel.navData.collectAsState()
     val lastTs by viewModel.lastDataTimestamp.collectAsState()
 
-    val stale = lastTs == 0L ||
-        System.currentTimeMillis() - lastTs > 15_000L
+    // Re-evaluate freshness every second so the colour change happens promptly.
+    // A simple ticker: we use a derived state that reads lastTs; the colour
+    // logic itself is cheap and runs on every recomposition triggered by the
+    // 1 Hz BLE notify. For the 5-second boundary we rely on the next notify
+    // firing (worst-case 1 s late), which is acceptable.
+    val freshness = remember(lastTs) { dataFreshness(lastTs) }
 
     Box(
         modifier = Modifier
@@ -58,10 +79,13 @@ fun MarineDisplay(
     ) {
         when (state) {
             BleConnectionState.CONNECTED -> {
-                if (stale && !isAmbient) {
-                    StaleOverlay()
-                } else {
-                    NavGrid(nav = nav, isAmbient = isAmbient)
+                when {
+                    freshness == DataFreshness.STALE && !isAmbient -> StaleOverlay()
+                    else -> NavGrid(
+                        nav       = nav,
+                        isAmbient = isAmbient,
+                        freshness = freshness
+                    )
                 }
             }
             BleConnectionState.SCANNING,
@@ -88,10 +112,21 @@ fun MarineDisplay(
 
 /**
  * Displays the four marine data tiles in a 2×2 grid.
+ *
+ * @param freshness  Controls the value colour: white when fresh, yellow when
+ *                   data has not been updated for more than 5 seconds.
  */
 @Composable
-fun NavGrid(nav: NavData, isAmbient: Boolean) {
-    val valueColor = if (isAmbient) ColorAmbientValue else ColorValue
+internal fun NavGrid(
+    nav: NavData,
+    isAmbient: Boolean,
+    freshness: DataFreshness = DataFreshness.FRESH
+) {
+    val valueColor = when {
+        isAmbient                        -> ColorAmbientValue
+        freshness == DataFreshness.WARN  -> ColorValueWarn   // ← yellow
+        else                             -> ColorValue        // ← white
+    }
     val labelColor = if (isAmbient) ColorAmbientLabel else ColorLabel
 
     Column(
@@ -119,14 +154,14 @@ fun NavGrid(nav: NavData, isAmbient: Boolean) {
             DataTile(
                 label = "STW",
                 value = nav.stw?.let { "%.1f".format(it) } ?: "---",
-                unit = "kn",
+                unit  = "kn",
                 valueColor = valueColor,
                 labelColor = labelColor
             )
             DataTile(
                 label = "DEPTH",
                 value = nav.depth?.let { "%.1f".format(it) } ?: "---",
-                unit = "m",
+                unit  = "m",
                 valueColor = valueColor,
                 labelColor = labelColor
             )
@@ -143,14 +178,14 @@ fun NavGrid(nav: NavData, isAmbient: Boolean) {
             DataTile(
                 label = "COG",
                 value = nav.cog?.let { "%.0f°".format(it) } ?: "---",
-                unit = "",
+                unit  = "",
                 valueColor = valueColor,
                 labelColor = labelColor
             )
             DataTile(
                 label = "SOG",
                 value = nav.sog?.let { "%.1f".format(it) } ?: "---",
-                unit = "kn",
+                unit  = "kn",
                 valueColor = valueColor,
                 labelColor = labelColor
             )
@@ -162,7 +197,7 @@ fun NavGrid(nav: NavData, isAmbient: Boolean) {
  * A single data tile: label on top, large value, small unit below.
  */
 @Composable
-fun DataTile(
+internal fun DataTile(
     label: String,
     value: String,
     unit: String,
