@@ -84,6 +84,38 @@ class BleManager(private val context: Context) {
         Log.i(TAG, "BleManager stopped")
     }
 
+    /**
+     * Gracefully terminate the active GATT connection without scheduling
+     * an automatic reconnect. Transitions to [BleConnectionState.DISCONNECTED].
+     */
+    fun disconnect() {
+        isStarted = false  // suppress auto-reconnect in onConnectionStateChange
+        stopScan()
+        if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            gatt?.disconnect()
+            gatt?.close()
+        }
+        gatt = null
+        _connectionState.value = BleConnectionState.DISCONNECTED
+        Log.i(TAG, "Disconnected by user request")
+    }
+
+    /**
+     * Stop any ongoing connection or scan and immediately restart scanning.
+     * Useful to recover from a stuck state or after the PIN has been changed.
+     */
+    fun reconnect() {
+        Log.i(TAG, "Reconnect requested by user")
+        stopScan()
+        if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            gatt?.disconnect()
+            gatt?.close()
+        }
+        gatt = null
+        isStarted = true
+        startScan()
+    }
+
     // ----------------------------------------------------------------
     // Scanning
     // ----------------------------------------------------------------

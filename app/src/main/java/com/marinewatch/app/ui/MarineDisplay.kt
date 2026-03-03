@@ -3,6 +3,10 @@ package com.marinewatch.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -11,10 +15,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.wear.compose.material.*
+import androidx.wear.compose.material.ButtonDefaults
+import androidx.wear.compose.material.CompactButton
+
 import com.marinewatch.app.MainViewModel
 import com.marinewatch.app.ble.BleConnectionState
 import com.marinewatch.app.ble.BleConstants
 import com.marinewatch.app.data.NavData
+import com.marinewatch.app.ui.SettingsScreen
 
 // ----------------------------------------------------------------
 // Colour palette
@@ -49,26 +57,26 @@ private fun dataFreshness(lastTs: Long): DataFreshness {
     }
 }
 
-/**
- * Root composable for the Marine Watch display.
- *
- * @param viewModel  The [MainViewModel] providing BLE state and NavData.
- * @param isAmbient  True when the watch is in ambient (always-on) mode.
- */
+
 @Composable
 fun MarineDisplay(
     viewModel: MainViewModel,
     isAmbient: Boolean = false
 ) {
+    var showSettings by remember { mutableStateOf(false) }
+
+    if (showSettings) {
+        SettingsScreen(
+            viewModel = viewModel,
+            onDismiss = { showSettings = false }
+        )
+        return
+    }
+
     val state  by viewModel.connectionState.collectAsState()
     val nav    by viewModel.navData.collectAsState()
     val lastTs by viewModel.lastDataTimestamp.collectAsState()
 
-    // Re-evaluate freshness every second so the colour change happens promptly.
-    // A simple ticker: we use a derived state that reads lastTs; the colour
-    // logic itself is cheap and runs on every recomposition triggered by the
-    // 1 Hz BLE notify. For the 5-second boundary we rely on the next notify
-    // firing (worst-case 1 s late), which is acceptable.
     val freshness = remember(lastTs) { dataFreshness(lastTs) }
 
     Box(
@@ -81,11 +89,7 @@ fun MarineDisplay(
             BleConnectionState.CONNECTED -> {
                 when {
                     freshness == DataFreshness.STALE && !isAmbient -> StaleOverlay()
-                    else -> NavGrid(
-                        nav       = nav,
-                        isAmbient = isAmbient,
-                        freshness = freshness
-                    )
+                    else -> NavGrid(nav = nav, isAmbient = isAmbient, freshness = freshness)
                 }
             }
             BleConnectionState.SCANNING,
@@ -101,6 +105,26 @@ fun MarineDisplay(
             }
             BleConnectionState.DISCONNECTED -> {
                 if (!isAmbient) DisconnectedScreen()
+            }
+        }
+
+        // Gear button — hidden in ambient mode
+        if (!isAmbient) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = 8.dp),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                CompactButton(
+                    modifier = Modifier.size(28.dp),
+                    onClick = { showSettings = true },
+                    colors = ButtonDefaults.buttonColors(
+                        backgroundColor = Color(0xFF1C2A30)
+                    )
+                ) {
+                    Text("⚙", fontSize = 12.sp, color = ColorLabel)
+                }
             }
         }
     }

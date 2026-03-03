@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Adaptive icon for the Marine Watch application.
-     Replace foreground/background drawables for a custom icon. -->
+<!--
+    Adaptive launcher icon for Marine Watch.
+    Foreground: custom anchor vector drawable.
+    Background: solid black (OLED-friendly).
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@android:color/black" />
-    <foreground android:drawable="@android:drawable/star_big_on" />
+    <foreground android:drawable="@drawable/ic_anchor" />
 </adaptive-icon>

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Anchor icon used as the Marine Watch application launcher icon.
+    Designed for a round Wear OS watch face (108×108 dp foreground area).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Anchor ring (top circle) -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#00BFFF"
+        android:strokeWidth="5"
+        android:pathData="M54,22 m-10,0 a10,10 0 1,1 20,0 a10,10 0 1,1 -20,0" />
+
+    <!-- Horizontal crossbar -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#00BFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M32,36 L76,36" />
+
+    <!-- Vertical shaft -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#00BFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M54,36 L54,82" />
+
+    <!-- Left arm of the anchor -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#00BFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M54,82 Q36,74 32,62" />
+
+    <!-- Right arm of the anchor -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#00BFFF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M54,82 Q72,74 76,62" />
+
+    <!-- Left fluke tip -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#00BFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M32,62 L24,58 M32,62 L28,70" />
+
+    <!-- Right fluke tip -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#00BFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M76,62 L84,58 M76,62 L80,70" />
+
+</vector>
