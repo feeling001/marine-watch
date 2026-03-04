@@ -1,5 +1,6 @@
 package com.marinewatch.app.ui
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
@@ -74,6 +75,7 @@ private fun dataFreshness(lastTs: Long): DataFreshness {
  *      pages 0–[DATA_PAGE_COUNT-1] : configurable 2×2 data grids
  *      page  [CONFIG_PAGE_INDEX]   : page-layout configuration UI + Settings link
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MarineDisplay(
     viewModel: MainViewModel,
@@ -127,6 +129,7 @@ fun MarineDisplay(
 // Main pager — always rendered
 // ─────────────────────────────────────────────────────────────────────────────
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MainPager(
     state:          BleConnectionState,
