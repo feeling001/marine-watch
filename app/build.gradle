@@ -19,7 +19,7 @@ android {
         release {
             minifyEnabled true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.debug   // Use debug signing for now; replace for production
+            signingConfig signingConfigs.debug   // Replace with production signing for release
         }
         debug {
             debuggable true
@@ -56,6 +56,12 @@ dependencies {
     implementation 'androidx.wear.compose:compose-material:1.3.0'
     implementation 'androidx.wear.compose:compose-foundation:1.3.0'
     implementation 'androidx.activity:activity-compose:1.8.2'
+
+    // HorizontalPager + PagerIndicator for Wear OS
+    // Accompanist Pager is the recommended approach for Wear OS swipeable pages
+    // until androidx.wear.compose ships a first-party pager component.
+    implementation 'com.google.accompanist:accompanist-pager:0.32.0'
+    implementation 'com.google.accompanist:accompanist-pager-indicators:0.32.0'
 
     // Lifecycle & ViewModel
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
