@@ -5,6 +5,7 @@ import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -24,11 +25,41 @@ private const val TAG = "MarineWatch.BLE"
  *  - Connects and discovers the Navigation GATT service
  *  - Enables NOTIFY on the NavData characteristic
  *  - Parses incoming JSON and exposes [navData] as a StateFlow
- *  - Auto-reconnects on link loss
+ *  - Auto-reconnects on link loss using exponential backoff
+ *  - Detects BLE pairing events and exposes them via [connectionState]
+ *
+ * Reconnection schedule (then permanent abandon):
+ *   attempt 1 →  5 s
+ *   attempt 2 → 10 s
+ *   attempt 3 → 30 s
+ *   attempt 4 → 60 s
+ *   attempt 5 → 120 s
+ *   attempt 6 → 300 s
+ *   attempt 7+→ give up → DISCONNECTED (no further retries)
  *
  * Call [start] once permissions are granted, [stop] when the owning component is destroyed.
  */
 class BleManager(private val context: Context) {
+
+    // ----------------------------------------------------------------
+    // Exponential backoff schedule
+    // ----------------------------------------------------------------
+
+    /**
+     * Delay sequence in milliseconds.
+     * When [reconnectAttempt] exceeds the last index the manager gives up.
+     */
+    private val BACKOFF_SCHEDULE_MS = longArrayOf(
+        5_000L,
+        10_000L,
+        30_000L,
+        60_000L,
+        120_000L,
+        300_000L
+    )
+
+    /** Current position in [BACKOFF_SCHEDULE_MS]. Reset to 0 on a successful connection. */
+    private var reconnectAttempt = 0
 
     // ----------------------------------------------------------------
     // Public state flows observed by the ViewModel / UI
@@ -59,6 +90,9 @@ class BleManager(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val gson = Gson()
 
+    // Runnable reference kept so a pending reconnect can be cancelled on demand
+    private var pendingReconnectRunnable: Runnable? = null
+
     // ----------------------------------------------------------------
     // Public API
     // ----------------------------------------------------------------
@@ -67,6 +101,7 @@ class BleManager(private val context: Context) {
     fun start() {
         if (isStarted) return
         isStarted = true
+        reconnectAttempt = 0
         Log.i(TAG, "BleManager started")
         startScan()
     }
@@ -74,12 +109,9 @@ class BleManager(private val context: Context) {
     /** Release all BLE resources. */
     fun stop() {
         isStarted = false
+        cancelPendingReconnect()
         stopScan()
-        gatt?.let {
-            it.disconnect()
-            it.close()
-        }
-        gatt = null
+        closeGatt()
         _connectionState.value = BleConnectionState.DISCONNECTED
         Log.i(TAG, "BleManager stopped")
     }
@@ -89,29 +121,31 @@ class BleManager(private val context: Context) {
      * an automatic reconnect. Transitions to [BleConnectionState.DISCONNECTED].
      */
     fun disconnect() {
-        isStarted = false  // suppress auto-reconnect in onConnectionStateChange
+        isStarted = false          // suppress auto-reconnect in onConnectionStateChange
+        cancelPendingReconnect()
         stopScan()
         if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
             gatt?.disconnect()
-            gatt?.close()
         }
-        gatt = null
+        closeGatt()
         _connectionState.value = BleConnectionState.DISCONNECTED
         Log.i(TAG, "Disconnected by user request")
     }
 
     /**
      * Stop any ongoing connection or scan and immediately restart scanning.
+     * Also resets the backoff counter so reconnection starts fresh.
      * Useful to recover from a stuck state or after the PIN has been changed.
      */
     fun reconnect() {
-        Log.i(TAG, "Reconnect requested by user")
+        Log.i(TAG, "Reconnect requested by user — resetting backoff counter")
+        cancelPendingReconnect()
         stopScan()
         if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
             gatt?.disconnect()
-            gatt?.close()
         }
-        gatt = null
+        closeGatt()
+        reconnectAttempt = 0
         isStarted = true
         startScan()
     }
@@ -123,7 +157,9 @@ class BleManager(private val context: Context) {
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device
-            if (device.name == BleConstants.DEVICE_NAME) {
+            if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return
+            val name = try { device.name } catch (e: SecurityException) { null }
+            if (name == BleConstants.DEVICE_NAME) {
                 Log.i(TAG, "Found ${BleConstants.DEVICE_NAME} — ${device.address}")
                 stopScan()
                 connectToDevice(device)
@@ -161,7 +197,11 @@ class BleManager(private val context: Context) {
 
     private fun stopScan() {
         if (!hasPermission(Manifest.permission.BLUETOOTH_SCAN)) return
-        bleScanner?.stopScan(scanCallback)
+        try {
+            bleScanner?.stopScan(scanCallback)
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "stopScan called when adapter was off: ${e.message}")
+        }
     }
 
     // ----------------------------------------------------------------
@@ -186,17 +226,22 @@ class BleManager(private val context: Context) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     Log.i(TAG, "GATT connected — requesting MTU 512")
+                    // Reset backoff on successful link establishment
+                    reconnectAttempt = 0
                     _connectionState.value = BleConnectionState.CONNECTING
                     if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
                         // Request a larger MTU before service discovery.
                         // Default BLE MTU is 23 bytes (20 usable for notify).
                         // The ESP32 JSON payload can exceed that easily.
-                        // onMtuChanged() will trigger discoverServices() once negotiated.
+                        // onMtuChanged() triggers discoverServices() once negotiated.
                         gatt.requestMtu(512)
                     }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.w(TAG, "GATT disconnected (status=$status)")
+                    // GATT status 8  = connection timeout / supervision timeout
+                    // GATT status 19 = remote device terminated connection
+                    // GATT status 133 = infamous Android BLE stack error — always retry
                     cleanupGatt()
                     if (isStarted) scheduleReconnect()
                 }
@@ -239,18 +284,19 @@ class BleManager(private val context: Context) {
                 return
             }
 
-            // Enable local notifications
             if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return
+
+            // Enable local notification routing in the Android BLE stack
             gatt.setCharacteristicNotification(navChar, true)
 
-            // Write CCCD descriptor to tell the peripheral to send notifications
+            // Write CCCD to instruct the peripheral to start sending notifications.
+            // API 33+ provides a non-deprecated overload that takes the value directly.
             val descriptor = navChar.getDescriptor(BleConstants.CCCD_UUID)
             if (descriptor != null) {
-                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(descriptor)
-                Log.i(TAG, "CCCD written — awaiting NavData notifications")
+                writeCccd(gatt, descriptor)
+                Log.i(TAG, "CCCD write initiated — awaiting NavData notifications")
             } else {
-                // Descriptor missing — still try to read
+                // Descriptor missing — unlikely but we stay connected and try anyway
                 Log.w(TAG, "CCCD descriptor not found; notifications may not arrive")
                 _connectionState.value = BleConnectionState.CONNECTED
             }
@@ -267,22 +313,27 @@ class BleManager(private val context: Context) {
                     _connectionState.value = BleConnectionState.CONNECTED
                 } else {
                     Log.e(TAG, "Failed to write CCCD: status=$status")
+                    // Do not reconnect immediately — the link is still alive.
+                    // The UI will show stale data until a reconnect is forced.
                 }
             }
         }
+
+        // ── CharacteristicChanged — dual override for API < 33 / ≥ 33 ──
 
         @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
+            // Only called on API < 33
             if (characteristic.uuid == BleConstants.NAV_DATA_CHAR_UUID) {
                 val raw = characteristic.value ?: return
                 parseNavData(raw)
             }
         }
 
-        // API 33+ override
+        // Non-deprecated override introduced in API 33
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
@@ -293,6 +344,111 @@ class BleManager(private val context: Context) {
             }
         }
     }
+
+    // ----------------------------------------------------------------
+    // CCCD write — non-deprecated path for API 33+, legacy for API < 33
+    // ----------------------------------------------------------------
+
+    /**
+     * Writes [BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE] to [descriptor].
+     *
+     * On API ≥ 33 the new [BluetoothGatt.writeDescriptor] overload that accepts
+     * a [ByteArray] directly is used, avoiding the deprecated setter on
+     * [BluetoothGattDescriptor.value].
+     *
+     * On API < 33 the classic approach is used as a fallback.
+     */
+    @Suppress("DEPRECATION")
+    private fun writeCccd(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // API 33+ — non-deprecated overload
+            gatt.writeDescriptor(
+                descriptor,
+                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            )
+        } else {
+            // API < 33 — classic approach (deprecated since API 33 but still functional)
+            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            gatt.writeDescriptor(descriptor)
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Pairing / bonding detection
+    //
+    // The Android BLE stack handles the pairing dialog automatically;
+    // there is no GATT callback for it. We detect the pairing window by
+    // listening to BluetoothDevice.ACTION_BOND_STATE_CHANGED via a
+    // BroadcastReceiver registered in the companion object, and by
+    // checking the bond state when a CONNECTING transition occurs.
+    //
+    // The simpler approach used here: expose PAIRING state during the
+    // CONNECTING window when the remote device is already in the
+    // BOND_BONDING state. The OS shows the pairing dialog then.
+    // ----------------------------------------------------------------
+
+    /**
+     * BroadcastReceiver that listens for bond state changes and updates
+     * [_connectionState] to [BleConnectionState.PAIRING] when the OS
+     * pairing dialog is active.
+     *
+     * Register this receiver in [MainActivity.onCreate] with
+     * `IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)` and
+     * unregister it in `onDestroy`.
+     *
+     * Example (in MainActivity):
+     * ```kotlin
+     * private val bondReceiver = bleManager.createBondStateReceiver()
+     *
+     * override fun onCreate(...) {
+     *     registerReceiver(bondReceiver,
+     *         IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED))
+     * }
+     * override fun onDestroy() {
+     *     unregisterReceiver(bondReceiver)
+     *     super.onDestroy()
+     * }
+     * ```
+     */
+    fun createBondStateReceiver(): android.content.BroadcastReceiver =
+        object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: android.content.Intent) {
+                if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+
+                val bondState = intent.getIntExtra(
+                    BluetoothDevice.EXTRA_BOND_STATE,
+                    BluetoothDevice.BOND_NONE
+                )
+                val previousBondState = intent.getIntExtra(
+                    BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE,
+                    BluetoothDevice.BOND_NONE
+                )
+
+                Log.d(TAG, "Bond state changed: $previousBondState → $bondState")
+
+                when (bondState) {
+                    BluetoothDevice.BOND_BONDING -> {
+                        // OS pairing dialog is now visible to the user
+                        Log.i(TAG, "Pairing in progress — showing PAIRING state")
+                        _connectionState.value = BleConnectionState.PAIRING
+                    }
+                    BluetoothDevice.BOND_BONDED -> {
+                        // Pairing completed successfully — resume normal connection flow
+                        Log.i(TAG, "Pairing successful (BOND_BONDED)")
+                        if (_connectionState.value == BleConnectionState.PAIRING) {
+                            _connectionState.value = BleConnectionState.CONNECTING
+                        }
+                    }
+                    BluetoothDevice.BOND_NONE -> {
+                        if (previousBondState == BluetoothDevice.BOND_BONDING) {
+                            // User cancelled or pairing failed
+                            Log.w(TAG, "Pairing failed or cancelled")
+                            _connectionState.value = BleConnectionState.DISCONNECTED
+                        }
+                    }
+                }
+            }
+        }
 
     // ----------------------------------------------------------------
     // JSON parsing
@@ -313,23 +469,73 @@ class BleManager(private val context: Context) {
     }
 
     // ----------------------------------------------------------------
+    // Reconnection with exponential backoff
+    // ----------------------------------------------------------------
+
+    /**
+     * Schedules a reconnection attempt using the exponential backoff schedule.
+     *
+     * If [reconnectAttempt] has exceeded the last index of [BACKOFF_SCHEDULE_MS],
+     * the manager gives up and transitions to [BleConnectionState.DISCONNECTED].
+     * The user must then trigger [reconnect] manually.
+     */
+    private fun scheduleReconnect() {
+        if (reconnectAttempt >= BACKOFF_SCHEDULE_MS.size) {
+            Log.w(
+                TAG,
+                "All ${BACKOFF_SCHEDULE_MS.size} reconnection attempts exhausted — giving up"
+            )
+            _connectionState.value = BleConnectionState.DISCONNECTED
+            isStarted = false
+            return
+        }
+
+        val delayMs = BACKOFF_SCHEDULE_MS[reconnectAttempt]
+        Log.i(
+            TAG,
+            "Reconnect attempt ${reconnectAttempt + 1}/${BACKOFF_SCHEDULE_MS.size} " +
+                    "scheduled in ${delayMs / 1000} s"
+        )
+        _connectionState.value = BleConnectionState.RECONNECTING
+
+        val runnable = Runnable {
+            pendingReconnectRunnable = null
+            if (isStarted) {
+                reconnectAttempt++
+                startScan()
+            }
+        }
+        pendingReconnectRunnable = runnable
+        mainHandler.postDelayed(runnable, delayMs)
+    }
+
+    /** Cancel any reconnect that is waiting in the handler queue. */
+    private fun cancelPendingReconnect() {
+        pendingReconnectRunnable?.let {
+            mainHandler.removeCallbacks(it)
+            pendingReconnectRunnable = null
+            Log.d(TAG, "Pending reconnect cancelled")
+        }
+    }
+
+    // ----------------------------------------------------------------
     // Helpers
     // ----------------------------------------------------------------
 
     private fun cleanupGatt() {
-        if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
-            gatt?.close()
-        }
-        gatt = null
+        closeGatt()
         _connectionState.value = BleConnectionState.RECONNECTING
     }
 
-    private fun scheduleReconnect() {
-        Log.i(TAG, "Reconnecting in ${BleConstants.RECONNECT_DELAY_MS} ms")
-        _connectionState.value = BleConnectionState.RECONNECTING
-        mainHandler.postDelayed({
-            if (isStarted) startScan()
-        }, BleConstants.RECONNECT_DELAY_MS)
+    private fun closeGatt() {
+        if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            try {
+                gatt?.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Exception while closing GATT: ${e.message}")
+            }
+        }
+        gatt = null
     }
 
     private fun hasPermission(permission: String): Boolean =
