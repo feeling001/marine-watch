@@ -8,7 +8,12 @@ import com.marinewatch.app.ble.BleConnectionState
 import com.marinewatch.app.ble.BleConstants
 import com.marinewatch.app.ble.BleManager
 import com.marinewatch.app.data.NavData
+import com.marinewatch.app.data.PageConfig
+import com.marinewatch.app.data.loadPageConfigs
+import com.marinewatch.app.data.savePageConfigs
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 private const val PREFS_NAME = "marine_watch_prefs"
 private const val PREF_PIN   = "ble_pin_code"
@@ -21,20 +26,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val bleManager = BleManager(application)
 
     val connectionState: StateFlow<BleConnectionState> = bleManager.connectionState
-    val navData: StateFlow<NavData> = bleManager.navData
-    val lastDataTimestamp: StateFlow<Long> = bleManager.lastDataTimestamp
+    val navData: StateFlow<NavData>                    = bleManager.navData
+    val lastDataTimestamp: StateFlow<Long>             = bleManager.lastDataTimestamp
+
+    // ── Page configuration ────────────────────────────────────────────────────
+
+    private val _pageConfigs = MutableStateFlow(prefs.loadPageConfigs())
+    val pageConfigs: StateFlow<List<PageConfig>> = _pageConfigs.asStateFlow()
+
+    /**
+     * Persists a new slot assignment for the given page and slot index.
+     * Emits an updated [pageConfigs] snapshot so the UI recomposes immediately.
+     */
+    fun updateSlot(pageIndex: Int, slotIndex: Int, field: com.marinewatch.app.data.DataField) {
+        val current = _pageConfigs.value.toMutableList()
+        val page    = current[pageIndex]
+        val newSlots = page.slots.toMutableList().also { it[slotIndex] = field }
+        current[pageIndex] = PageConfig(newSlots)
+        _pageConfigs.value = current
+        prefs.savePageConfigs(current)
+    }
+
+    // ── BLE helpers ───────────────────────────────────────────────────────────
 
     fun isDataStale(): Boolean {
         val ts = lastDataTimestamp.value
         return ts == 0L || System.currentTimeMillis() - ts > BleConstants.DATA_STALE_THRESHOLD_MS
     }
 
-    fun startBle() = bleManager.start()
+    fun startBle()   = bleManager.start()
     fun disconnect() = bleManager.disconnect()
-    fun reconnect() = bleManager.reconnect()
+    fun reconnect()  = bleManager.reconnect()
 
-    fun getPinCode(): Int = prefs.getInt(PREF_PIN, BleConstants.PASSKEY)
-    fun setPinCode(pin: Int) = prefs.edit().putInt(PREF_PIN, pin).apply()
+    fun getPinCode(): Int         = prefs.getInt(PREF_PIN, BleConstants.PASSKEY)
+    fun setPinCode(pin: Int)      = prefs.edit().putInt(PREF_PIN, pin).apply()
 
     override fun onCleared() {
         super.onCleared()
