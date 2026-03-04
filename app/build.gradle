@@ -1,16 +1,18 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
+    // Nécessaire en Kotlin 2.x pour Jetpack Compose
+    id 'org.jetbrains.kotlin.plugin.compose'
 }
 
 android {
     namespace 'com.marinewatch.app'
-    compileSdk 34
+    compileSdk 35
 
     defaultConfig {
         applicationId "com.marinewatch.app"
         minSdk 30          // Wear OS 3+ (Galaxy Watch 4+)
-        targetSdk 34
+        targetSdk 35
         versionCode 1
         versionName "1.0.0"
     }
@@ -30,9 +32,10 @@ android {
         compose true
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion '1.5.10'
-    }
+    // En Kotlin 2.x avec le plugin kotlin.plugin.compose,
+    // kotlinCompilerExtensionVersion n'est PLUS nécessaire ici.
+    // Le Compose Compiler est automatiquement aligné avec la version de Kotlin.
+    // composeOptions { ... }  ← SUPPRIMÉ
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -48,31 +51,29 @@ dependencies {
     // Wear OS core
     implementation 'androidx.wear:wear:1.3.0'
 
-    // Compose for Wear OS
-    // Note: compose-navigation is intentionally excluded — it pulls
-    // androidx.navigation which conflicts with the Wear OS BOM versions.
-    // This app is single-screen and does not need navigation.
-    implementation platform('androidx.compose:compose-bom:2024.02.00')
-    implementation 'androidx.wear.compose:compose-material:1.3.0'
-    implementation 'androidx.wear.compose:compose-foundation:1.3.0'
-    implementation 'androidx.activity:activity-compose:1.8.2'
+    // Compose for Wear OS — BOM mis à jour
+    implementation platform('androidx.compose:compose-bom:2025.05.00')
+    implementation 'androidx.wear.compose:compose-material:1.4.0'
+    implementation 'androidx.wear.compose:compose-foundation:1.4.0'
+    implementation 'androidx.activity:activity-compose:1.10.1'
 
-    // HorizontalPager + PagerIndicator for Wear OS
-    // Accompanist Pager is the recommended approach for Wear OS swipeable pages
-    // until androidx.wear.compose ships a first-party pager component.
-    implementation 'com.google.accompanist:accompanist-pager:0.32.0'
-    implementation 'com.google.accompanist:accompanist-pager-indicators:0.32.0'
+    // HorizontalPager — Accompanist est déprécié en Kotlin 2.x / Compose 1.7+
+    // La Pager API est maintenant dans androidx.compose.foundation (stable)
+    // Les imports androidx.compose.foundation.pager.* dans votre code sont déjà corrects !
+    // Suppression de :
+    //   com.google.accompanist:accompanist-pager
+    //   com.google.accompanist:accompanist-pager-indicators
 
     // Lifecycle & ViewModel
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
-    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7'
 
     // JSON parsing
-    implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3'
-    implementation 'com.google.code.gson:gson:2.10.1'
+    implementation 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3'
+    implementation 'com.google.code.gson:gson:2.11.0'
 
     // Coroutines
-    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
 
     // UI
     implementation 'androidx.compose.ui:ui'
