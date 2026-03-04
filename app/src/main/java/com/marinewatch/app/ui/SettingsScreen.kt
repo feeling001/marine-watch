@@ -61,7 +61,10 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-
+            // ── Back ──────────────────────────────────────────────
+            item {
+                ActionChip(label = "← Back", color = ColorLabel, onClick = onDismiss)
+            }
             // ── Screen title ──────────────────────────────────────
             item {
                 Text(
@@ -72,6 +75,40 @@ fun SettingsScreen(
                     letterSpacing = 2.sp
                 )
             }
+
+
+            // ── Connection section ────────────────────────────────
+            item {
+                SettingsSection(title = "CONNECTION") {
+                    ConnectionStatusBadge(state = connectionState)
+
+                    Spacer(Modifier.height(8.dp))
+
+                    val canDisconnect = connectionState == BleConnectionState.CONNECTED ||
+                            connectionState == BleConnectionState.CONNECTING ||
+                            connectionState == BleConnectionState.SCANNING
+
+                    ActionChip(
+                        label = "Disconnect",
+                        color = if (canDisconnect) ColorDanger else ColorLabel,
+                        enabled = canDisconnect,
+                        onClick = { viewModel.disconnect() }
+                    )
+
+                    Spacer(Modifier.height(6.dp))
+
+                    val canReconnect = connectionState == BleConnectionState.DISCONNECTED ||
+                            connectionState == BleConnectionState.RECONNECTING
+
+                    ActionChip(
+                        label = "Force reconnect",
+                        color = if (canReconnect) ColorSuccess else ColorLabel,
+                        enabled = canReconnect,
+                        onClick = { viewModel.reconnect() }
+                    )
+                }
+            }
+
 
             // ── PIN section ───────────────────────────────────────
             item {
@@ -128,43 +165,6 @@ fun SettingsScreen(
                         )
                     }
                 }
-            }
-
-            // ── Connection section ────────────────────────────────
-            item {
-                SettingsSection(title = "CONNECTION") {
-                    ConnectionStatusBadge(state = connectionState)
-
-                    Spacer(Modifier.height(8.dp))
-
-                    val canDisconnect = connectionState == BleConnectionState.CONNECTED ||
-                            connectionState == BleConnectionState.CONNECTING ||
-                            connectionState == BleConnectionState.SCANNING
-
-                    ActionChip(
-                        label = "Disconnect",
-                        color = if (canDisconnect) ColorDanger else ColorLabel,
-                        enabled = canDisconnect,
-                        onClick = { viewModel.disconnect() }
-                    )
-
-                    Spacer(Modifier.height(6.dp))
-
-                    val canReconnect = connectionState == BleConnectionState.DISCONNECTED ||
-                            connectionState == BleConnectionState.RECONNECTING
-
-                    ActionChip(
-                        label = "Force reconnect",
-                        color = if (canReconnect) ColorSuccess else ColorLabel,
-                        enabled = canReconnect,
-                        onClick = { viewModel.reconnect() }
-                    )
-                }
-            }
-
-            // ── Back ──────────────────────────────────────────────
-            item {
-                ActionChip(label = "← Back", color = ColorLabel, onClick = onDismiss)
             }
         }
     }

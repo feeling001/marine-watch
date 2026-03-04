@@ -156,7 +156,7 @@ internal fun NavGrid(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 8.dp, vertical = 12.dp),
+            .padding(horizontal = 8.dp, vertical = 20.dp),
         verticalArrangement = Arrangement.SpaceEvenly,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
