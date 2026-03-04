@@ -10,12 +10,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
 import androidx.wear.compose.material.*
-import com.google.accompanist.pager.ExperimentalPagerApi
-import com.google.accompanist.pager.HorizontalPager
-import com.google.accompanist.pager.HorizontalPagerIndicator
-import com.google.accompanist.pager.rememberPagerState
 import com.marinewatch.app.MainViewModel
 import com.marinewatch.app.ble.BleConnectionState
 import com.marinewatch.app.ble.BleConstants
@@ -75,7 +74,6 @@ private fun dataFreshness(lastTs: Long): DataFreshness {
  *      pages 0–[DATA_PAGE_COUNT-1] : configurable 2×2 data grids
  *      page  [CONFIG_PAGE_INDEX]   : page-layout configuration UI + Settings link
  */
-@OptIn(ExperimentalPagerApi::class)
 @Composable
 fun MarineDisplay(
     viewModel: MainViewModel,
@@ -85,8 +83,8 @@ fun MarineDisplay(
 
     if (showSettings) {
         SettingsScreen(
-            viewModel  = viewModel,
-            onDismiss  = { showSettings = false }
+            viewModel = viewModel,
+            onDismiss = { showSettings = false }
         )
         return
     }
@@ -96,50 +94,42 @@ fun MarineDisplay(
     val lastTs      by viewModel.lastDataTimestamp.collectAsState()
     val pageConfigs by viewModel.pageConfigs.collectAsState()
 
-    val freshness  = remember(lastTs) { dataFreshness(lastTs) }
+    val freshness   = remember(lastTs) { dataFreshness(lastTs) }
     val displayData = remember(nav) { DisplayData(nav = nav) }
 
     Box(
-        modifier           = Modifier
+        modifier         = Modifier
             .fillMaxSize()
             .background(if (isAmbient) ColorAmbientBg else ColorBackground),
-        contentAlignment   = Alignment.Center
+        contentAlignment = Alignment.Center
     ) {
-        when (state) {
-            BleConnectionState.CONNECTED -> {
-                ConnectedContent(
-                    displayData  = displayData,
-                    pageConfigs  = pageConfigs,
-                    freshness    = freshness,
-                    isAmbient    = isAmbient,
-                    viewModel    = viewModel,
-                    onOpenSettings = { showSettings = true }
-                )
-            }
-            BleConnectionState.SCANNING,
-            BleConnectionState.CONNECTING -> {
-                if (!isAmbient) ConnectingScreen(state)
-            }
-            BleConnectionState.RECONNECTING -> {
-                if (!isAmbient) ReconnectingScreen() else AmbientOfflineIndicator()
-            }
-            BleConnectionState.PAIRING -> {
-                if (!isAmbient) PairingScreen()
-            }
-            BleConnectionState.DISCONNECTED -> {
-                if (!isAmbient) DisconnectedScreen()
-            }
+        // The pager is always rendered regardless of BLE state so the Config
+        // page (and its Settings link) remain accessible at all times.
+        // BLE status overlays are shown inside the data pages only.
+        MainPager(
+            state          = state,
+            displayData    = displayData,
+            pageConfigs    = pageConfigs,
+            freshness      = freshness,
+            isAmbient      = isAmbient,
+            viewModel      = viewModel,
+            onOpenSettings = { showSettings = true }
+        )
+
+        // Ambient offline indicator sits on top of the pager (no swipe needed)
+        if (isAmbient && state == BleConnectionState.RECONNECTING) {
+            AmbientOfflineIndicator()
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Connected pager
+// Main pager — always rendered
 // ─────────────────────────────────────────────────────────────────────────────
 
-@OptIn(ExperimentalPagerApi::class)
 @Composable
-private fun ConnectedContent(
+private fun MainPager(
+    state:          BleConnectionState,
     displayData:    DisplayData,
     pageConfigs:    List<PageConfig>,
     freshness:      DataFreshness,
@@ -147,18 +137,18 @@ private fun ConnectedContent(
     viewModel:      MainViewModel,
     onOpenSettings: () -> Unit
 ) {
-    val pagerState = rememberPagerState()
+    val pagerState = rememberPagerState { TOTAL_PAGES }
 
     Box(modifier = Modifier.fillMaxSize()) {
 
         HorizontalPager(
-            count    = TOTAL_PAGES,
             state    = pagerState,
             modifier = Modifier.fillMaxSize()
         ) { pageIndex ->
             when {
                 pageIndex < DATA_PAGE_COUNT -> {
                     DataPage(
+                        bleState    = state,
                         config      = pageConfigs[pageIndex],
                         displayData = displayData,
                         freshness   = freshness,
@@ -178,17 +168,25 @@ private fun ConnectedContent(
 
         // Pager dots — hidden in ambient mode to preserve OLED
         if (!isAmbient) {
-            HorizontalPagerIndicator(
-                pagerState       = pagerState,
-                modifier         = Modifier
+            Row(
+                modifier              = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 6.dp),
-                activeColor      = ColorAccent,
-                inactiveColor    = ColorLabel.copy(alpha = 0.4f),
-                indicatorWidth   = 5.dp,
-                indicatorHeight  = 5.dp,
-                spacing          = 4.dp
-            )
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment     = Alignment.CenterVertically
+            ) {
+                repeat(TOTAL_PAGES) { index ->
+                    val isSelected = pagerState.currentPage == index
+                    Box(
+                        modifier = Modifier
+                            .size(if (isSelected) 6.dp else 5.dp)
+                            .background(
+                                color  = if (isSelected) ColorAccent else ColorLabel.copy(alpha = 0.4f),
+                                shape  = RoundedCornerShape(50)
+                            )
+                    )
+                }
+            }
         }
     }
 }
@@ -197,8 +195,20 @@ private fun ConnectedContent(
 // Data page (pages 0 – DATA_PAGE_COUNT-1)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * A single data page in the pager.
+ *
+ * Priority of what is shown (highest first):
+ *  1. BLE status overlay  — when not CONNECTED (Scanning / Connecting / Pairing /
+ *                           Reconnecting / Disconnected)
+ *  2. Stale data overlay  — CONNECTED but no packet for > [BleConstants.DATA_STALE_THRESHOLD_MS]
+ *  3. NavGrid             — normal operating state
+ *
+ * The Config page is never affected; it is always rendered by [MainPager] directly.
+ */
 @Composable
 private fun DataPage(
+    bleState:    BleConnectionState,
     config:      PageConfig,
     displayData: DisplayData,
     freshness:   DataFreshness,
@@ -210,7 +220,20 @@ private fun DataPage(
         contentAlignment = Alignment.Center
     ) {
         when {
+            // ── BLE not connected → status overlay ────────────────────────────
+            !isAmbient && bleState != BleConnectionState.CONNECTED -> {
+                when (bleState) {
+                    BleConnectionState.SCANNING,
+                    BleConnectionState.CONNECTING  -> ConnectingScreen(bleState)
+                    BleConnectionState.RECONNECTING -> ReconnectingScreen()
+                    BleConnectionState.PAIRING      -> PairingScreen()
+                    BleConnectionState.DISCONNECTED -> DisconnectedScreen()
+                    else                            -> Unit
+                }
+            }
+            // ── Connected but data is stale ───────────────────────────────────
             freshness == DataFreshness.STALE && !isAmbient -> StaleOverlay()
+            // ── Normal display ────────────────────────────────────────────────
             else -> NavGrid(
                 config      = config,
                 displayData = displayData,
@@ -423,7 +446,7 @@ private fun PageSlotEditor(
     Column(
         modifier            = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF0D1A20), androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+            .background(Color(0xFF0D1A20), RoundedCornerShape(12.dp))
             .padding(horizontal = 10.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
