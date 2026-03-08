@@ -40,10 +40,7 @@ private val ColorAmbientLabel = Color(0xFF455A64)
 private val ColorSuccess      = Color(0xFF69F0AE)
 private val ColorDanger       = Color(0xFFFF5252)
 
-/** Total number of swipable pages: DATA_PAGE_COUNT data pages + 1 config page. */
-private val TOTAL_PAGES = DATA_PAGE_COUNT + 1
-
-/** Index of the config page (last page). */
+private val TOTAL_PAGES      = DATA_PAGE_COUNT + 1
 private val CONFIG_PAGE_INDEX = DATA_PAGE_COUNT
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,15 +63,6 @@ private fun dataFreshness(lastTs: Long): DataFreshness {
 // Root composable
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Root display composable.
- *
- * Layout:
- *  - When BLE state is not CONNECTED → full-screen status overlay (no pager).
- *  - When CONNECTED → [HorizontalPager] with [TOTAL_PAGES] pages:
- *      pages 0–[DATA_PAGE_COUNT-1] : configurable 2×2 data grids
- *      page  [CONFIG_PAGE_INDEX]   : page-layout configuration UI + Settings link
- */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MarineDisplay(
@@ -93,11 +81,18 @@ fun MarineDisplay(
 
     val state       by viewModel.connectionState.collectAsState()
     val nav         by viewModel.navData.collectAsState()
+    val wind        by viewModel.windData.collectAsState()          // ← wind data
     val lastTs      by viewModel.lastDataTimestamp.collectAsState()
     val pageConfigs by viewModel.pageConfigs.collectAsState()
 
     val freshness   = remember(lastTs) { dataFreshness(lastTs) }
-    val displayData = remember(nav) { DisplayData(nav = nav) }
+    // Wind is null when EMPTY (no packet yet) so the UI shows "---" for wind fields
+    // rather than stale zeros. We pass null when all wind fields are null.
+    val windOrNull  = remember(wind) {
+        if (wind.aws == null && wind.awa == null && wind.tws == null &&
+            wind.twa == null && wind.twd == null) null else wind
+    }
+    val displayData = remember(nav, windOrNull) { DisplayData(nav = nav, wind = windOrNull) }
 
     Box(
         modifier         = Modifier
@@ -105,9 +100,6 @@ fun MarineDisplay(
             .background(if (isAmbient) ColorAmbientBg else ColorBackground),
         contentAlignment = Alignment.Center
     ) {
-        // The pager is always rendered regardless of BLE state so the Config
-        // page (and its Settings link) remain accessible at all times.
-        // BLE status overlays are shown inside the data pages only.
         MainPager(
             state          = state,
             displayData    = displayData,
@@ -118,7 +110,6 @@ fun MarineDisplay(
             onOpenSettings = { showSettings = true }
         )
 
-        // Ambient offline indicator sits on top of the pager (no swipe needed)
         if (isAmbient && state == BleConnectionState.RECONNECTING) {
             AmbientOfflineIndicator()
         }
@@ -126,7 +117,7 @@ fun MarineDisplay(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main pager — always rendered
+// Main pager
 // ─────────────────────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -169,7 +160,6 @@ private fun MainPager(
             }
         }
 
-        // Pager dots — hidden in ambient mode to preserve OLED
         if (!isAmbient) {
             Row(
                 modifier              = Modifier
@@ -184,8 +174,8 @@ private fun MainPager(
                         modifier = Modifier
                             .size(if (isSelected) 6.dp else 5.dp)
                             .background(
-                                color  = if (isSelected) ColorAccent else ColorLabel.copy(alpha = 0.4f),
-                                shape  = RoundedCornerShape(50)
+                                color = if (isSelected) ColorAccent else ColorLabel.copy(alpha = 0.4f),
+                                shape = RoundedCornerShape(50)
                             )
                     )
                 }
@@ -195,20 +185,9 @@ private fun MainPager(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Data page (pages 0 – DATA_PAGE_COUNT-1)
+// Data page
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * A single data page in the pager.
- *
- * Priority of what is shown (highest first):
- *  1. BLE status overlay  — when not CONNECTED (Scanning / Connecting / Pairing /
- *                           Reconnecting / Disconnected)
- *  2. Stale data overlay  — CONNECTED but no packet for > [BleConstants.DATA_STALE_THRESHOLD_MS]
- *  3. NavGrid             — normal operating state
- *
- * The Config page is never affected; it is always rendered by [MainPager] directly.
- */
 @Composable
 private fun DataPage(
     bleState:    BleConnectionState,
@@ -223,7 +202,6 @@ private fun DataPage(
         contentAlignment = Alignment.Center
     ) {
         when {
-            // ── BLE not connected → status overlay ────────────────────────────
             !isAmbient && bleState != BleConnectionState.CONNECTED -> {
                 when (bleState) {
                     BleConnectionState.SCANNING,
@@ -234,9 +212,7 @@ private fun DataPage(
                     else                            -> Unit
                 }
             }
-            // ── Connected but data is stale ───────────────────────────────────
             freshness == DataFreshness.STALE && !isAmbient -> StaleOverlay()
-            // ── Normal display ────────────────────────────────────────────────
             else -> NavGrid(
                 config      = config,
                 displayData = displayData,
@@ -284,44 +260,22 @@ internal fun NavGrid(
             )
         }
 
-        // Slots 0 & 1
         Row(
-            modifier                = Modifier.fillMaxWidth(),
-            horizontalArrangement   = Arrangement.SpaceEvenly
+            modifier              = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            DataTile(
-                field      = config.slots[0],
-                data       = displayData,
-                valueColor = valueColor,
-                labelColor = labelColor
-            )
-            DataTile(
-                field      = config.slots[1],
-                data       = displayData,
-                valueColor = valueColor,
-                labelColor = labelColor
-            )
+            DataTile(field = config.slots[0], data = displayData, valueColor = valueColor, labelColor = labelColor)
+            DataTile(field = config.slots[1], data = displayData, valueColor = valueColor, labelColor = labelColor)
         }
 
         if (!isAmbient) Spacer(modifier = Modifier.height(4.dp))
 
-        // Slots 2 & 3
         Row(
-            modifier                = Modifier.fillMaxWidth(),
-            horizontalArrangement   = Arrangement.SpaceEvenly
+            modifier              = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly
         ) {
-            DataTile(
-                field      = config.slots[2],
-                data       = displayData,
-                valueColor = valueColor,
-                labelColor = labelColor
-            )
-            DataTile(
-                field      = config.slots[3],
-                data       = displayData,
-                valueColor = valueColor,
-                labelColor = labelColor
-            )
+            DataTile(field = config.slots[2], data = displayData, valueColor = valueColor, labelColor = labelColor)
+            DataTile(field = config.slots[3], data = displayData, valueColor = valueColor, labelColor = labelColor)
         }
     }
 }
@@ -362,24 +316,9 @@ internal fun DataTile(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Config page (last page)
+// Config page
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * The configuration page lets the user assign a [DataField] to each slot of
- * each of the [DATA_PAGE_COUNT] data pages.
- *
- * Layout:
- *  ⚙ CONFIGURE
- *  ──────────────────
- *  PAGE 1
- *    [slot 0 picker] [slot 1 picker]
- *    [slot 2 picker] [slot 3 picker]
- *  PAGE 2  …
- *  PAGE 3  …
- *  ──────────────────
- *  [⚙ Settings]
- */
 @Composable
 private fun ConfigPage(
     pageConfigs:    List<PageConfig>,
@@ -405,8 +344,8 @@ private fun ConfigPage(
         repeat(DATA_PAGE_COUNT) { pageIndex ->
             item {
                 PageSlotEditor(
-                    pageIndex   = pageIndex,
-                    config      = pageConfigs[pageIndex],
+                    pageIndex    = pageIndex,
+                    config       = pageConfigs[pageIndex],
                     onSlotChange = { slotIndex, field ->
                         viewModel.updateSlot(pageIndex, slotIndex, field)
                     }
@@ -418,12 +357,12 @@ private fun ConfigPage(
 
         item {
             Chip(
-                modifier  = Modifier.fillMaxWidth().height(36.dp),
-                onClick   = onOpenSettings,
-                colors    = ChipDefaults.chipColors(
+                modifier = Modifier.fillMaxWidth().height(36.dp),
+                onClick  = onOpenSettings,
+                colors   = ChipDefaults.chipColors(
                     backgroundColor = ColorAccent.copy(alpha = 0.13f)
                 ),
-                label     = {
+                label    = {
                     Text(
                         text      = "BLE Settings",
                         color     = ColorAccent,
@@ -437,9 +376,6 @@ private fun ConfigPage(
     }
 }
 
-/**
- * Card showing the 4 slot pickers for a single page.
- */
 @Composable
 private fun PageSlotEditor(
     pageIndex:    Int,
@@ -462,51 +398,20 @@ private fun PageSlotEditor(
             modifier      = Modifier.padding(bottom = 8.dp)
         )
 
-        // Row: slot 0 | slot 1
-        Row(
-            modifier              = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            SlotPicker(
-                label         = "TL",
-                current       = config.slots[0],
-                onFieldChange = { onSlotChange(0, it) }
-            )
-            SlotPicker(
-                label         = "TR",
-                current       = config.slots[1],
-                onFieldChange = { onSlotChange(1, it) }
-            )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            SlotPicker(label = "TL", current = config.slots[0], onFieldChange = { onSlotChange(0, it) })
+            SlotPicker(label = "TR", current = config.slots[1], onFieldChange = { onSlotChange(1, it) })
         }
 
         Spacer(Modifier.height(6.dp))
 
-        // Row: slot 2 | slot 3
-        Row(
-            modifier              = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            SlotPicker(
-                label         = "BL",
-                current       = config.slots[2],
-                onFieldChange = { onSlotChange(2, it) }
-            )
-            SlotPicker(
-                label         = "BR",
-                current       = config.slots[3],
-                onFieldChange = { onSlotChange(3, it) }
-            )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            SlotPicker(label = "BL", current = config.slots[2], onFieldChange = { onSlotChange(2, it) })
+            SlotPicker(label = "BR", current = config.slots[3], onFieldChange = { onSlotChange(3, it) })
         }
     }
 }
 
-/**
- * Single slot picker: shows current field label and cycles through [DataField]
- * values with ◀ / ▶ buttons.
- *
- * @param label   Position hint shown above the picker (TL/TR/BL/BR).
- * @param current Currently assigned [DataField].
- */
 @Composable
 private fun SlotPicker(
     label:         String,
@@ -520,27 +425,18 @@ private fun SlotPicker(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier            = Modifier.width(64.dp)
     ) {
-        Text(
-            text      = label,
-            color     = ColorLabel,
-            fontSize  = 8.sp,
-            modifier  = Modifier.padding(bottom = 2.dp)
-        )
+        Text(text = label, color = ColorLabel, fontSize = 8.sp, modifier = Modifier.padding(bottom = 2.dp))
         Row(
             verticalAlignment     = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
             modifier              = Modifier.fillMaxWidth()
         ) {
-            // Previous field
             CompactButton(
                 modifier = Modifier.size(22.dp),
                 onClick  = { onFieldChange(fields[(idx - 1 + fields.size) % fields.size]) },
                 colors   = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1C2A30))
-            ) {
-                Text("◀", fontSize = 7.sp, color = ColorLabel)
-            }
+            ) { Text("◀", fontSize = 7.sp, color = ColorLabel) }
 
-            // Current field name
             Text(
                 text       = if (current == DataField.EMPTY) "—" else current.label,
                 color      = ColorValue,
@@ -550,38 +446,25 @@ private fun SlotPicker(
                 modifier   = Modifier.weight(1f)
             )
 
-            // Next field
             CompactButton(
                 modifier = Modifier.size(22.dp),
                 onClick  = { onFieldChange(fields[(idx + 1) % fields.size]) },
                 colors   = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1C2A30))
-            ) {
-                Text("▶", fontSize = 7.sp, color = ColorLabel)
-            }
+            ) { Text("▶", fontSize = 7.sp, color = ColorLabel) }
         }
 
-        // Unit hint
-        Text(
-            text     = current.unit,
-            color    = ColorLabel,
-            fontSize = 8.sp,
-            modifier = Modifier.padding(top = 1.dp)
-        )
+        Text(text = current.unit, color = ColorLabel, fontSize = 8.sp, modifier = Modifier.padding(top = 1.dp))
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Status / overlay screens (unchanged from original)
+// Status / overlay screens
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
 fun ConnectingScreen(state: BleConnectionState) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        CircularProgressIndicator(
-            modifier       = Modifier.size(32.dp),
-            strokeWidth    = 3.dp,
-            indicatorColor = ColorAccent
-        )
+        CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp, indicatorColor = ColorAccent)
         Spacer(Modifier.height(8.dp))
         Text(
             text     = when (state) {
@@ -600,17 +483,8 @@ fun ReconnectingScreen() {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text("⚓", fontSize = 28.sp)
         Spacer(Modifier.height(6.dp))
-        Text(
-            text       = "Signal lost",
-            color      = ColorWarning,
-            fontSize   = 13.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        Text(
-            text     = "Reconnecting…",
-            color    = ColorLabel,
-            fontSize = 11.sp
-        )
+        Text(text = "Signal lost", color = ColorWarning, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Text(text = "Reconnecting…", color = ColorLabel, fontSize = 11.sp)
     }
 }
 
@@ -622,19 +496,9 @@ fun PairingScreen() {
     ) {
         Text("🔒", fontSize = 24.sp)
         Spacer(Modifier.height(6.dp))
-        Text(
-            text       = "Pairing",
-            color      = ColorAccent,
-            fontSize   = 14.sp,
-            fontWeight = FontWeight.Bold
-        )
+        Text(text = "Pairing", color = ColorAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
-        Text(
-            text      = "Enter PIN shown\non the device",
-            color     = ColorLabel,
-            fontSize  = 11.sp,
-            textAlign = TextAlign.Center
-        )
+        Text(text = "Enter PIN shown\non the device", color = ColorLabel, fontSize = 11.sp, textAlign = TextAlign.Center)
     }
 }
 
@@ -643,11 +507,7 @@ fun DisconnectedScreen() {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text("📡", fontSize = 28.sp)
         Spacer(Modifier.height(6.dp))
-        Text(
-            text     = "Disconnected",
-            color    = ColorWarning,
-            fontSize = 13.sp
-        )
+        Text(text = "Disconnected", color = ColorWarning, fontSize = 13.sp)
     }
 }
 
@@ -656,25 +516,12 @@ fun StaleOverlay() {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text("⏳", fontSize = 28.sp)
         Spacer(Modifier.height(6.dp))
-        Text(
-            text     = "No data",
-            color    = ColorWarning,
-            fontSize = 13.sp
-        )
-        Text(
-            text     = "Check ESP32",
-            color    = ColorLabel,
-            fontSize = 11.sp
-        )
+        Text(text = "No data", color = ColorWarning, fontSize = 13.sp)
+        Text(text = "Check ESP32", color = ColorLabel, fontSize = 11.sp)
     }
 }
 
 @Composable
 fun AmbientOfflineIndicator() {
-    Text(
-        text          = "- OFFLINE -",
-        color         = ColorAmbientLabel,
-        fontSize      = 11.sp,
-        letterSpacing = 2.sp
-    )
+    Text(text = "- OFFLINE -", color = ColorAmbientLabel, fontSize = 11.sp, letterSpacing = 2.sp)
 }

@@ -30,21 +30,34 @@ object BleConstants {
      * NavData characteristic UUID.
      * Properties: READ + NOTIFY.
      * Payload: UTF-8 JSON, updated at 1 Hz.
-     *
-     * JSON shape:
-     * {
-     *   "lat": Float|null,
-     *   "lon": Float|null,
-     *   "sog": Float|null,   // Speed Over Ground, knots
-     *   "cog": Float|null,   // Course Over Ground, 0–360 °
-     *   "stw": Float|null,   // Speed Through Water, knots
-     *   "hdg_mag": Float|null,
-     *   "hdg_true": Float|null,
-     *   "depth": Float|null  // Depth below transducer, metres
-     * }
      */
     val NAV_DATA_CHAR_UUID: UUID =
         UUID.fromString("4d475743-0101-4e41-5649-474154494f4e")
+
+    // ----------------------------------------------------------------
+    // Wind Service
+    // ----------------------------------------------------------------
+
+    /** Wind GATT service UUID */
+    val WIND_SERVICE_UUID: UUID =
+        UUID.fromString("4d475743-0002-4e41-5649-474154494f4e")
+
+    /**
+     * WindData characteristic UUID.
+     * Properties: READ + NOTIFY.
+     * Payload: UTF-8 JSON, updated at 1 Hz.
+     *
+     * JSON shape:
+     * {
+     *   "aws": Float|null,   // Apparent Wind Speed, knots
+     *   "awa": Float|null,   // Apparent Wind Angle, degrees (-180 to +180, + = starboard)
+     *   "tws": Float|null,   // True Wind Speed, knots
+     *   "twa": Float|null,   // True Wind Angle, degrees (-180 to +180)
+     *   "twd": Float|null    // True Wind Direction, degrees true (0-360)
+     * }
+     */
+    val WIND_DATA_CHAR_UUID: UUID =
+        UUID.fromString("4d475743-0201-4e41-5649-474154494f4e")
 
     // ----------------------------------------------------------------
     // Standard CCCD descriptor used to enable notifications

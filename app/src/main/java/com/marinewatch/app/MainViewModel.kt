@@ -8,6 +8,7 @@ import com.marinewatch.app.ble.BleConnectionState
 import com.marinewatch.app.ble.BleConstants
 import com.marinewatch.app.ble.BleManager
 import com.marinewatch.app.data.NavData
+import com.marinewatch.app.data.WindData
 import com.marinewatch.app.data.PageConfig
 import com.marinewatch.app.data.loadPageConfigs
 import com.marinewatch.app.data.savePageConfigs
@@ -27,6 +28,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val connectionState: StateFlow<BleConnectionState> = bleManager.connectionState
     val navData: StateFlow<NavData>                    = bleManager.navData
+    val windData: StateFlow<WindData>                  = bleManager.windData
     val lastDataTimestamp: StateFlow<Long>             = bleManager.lastDataTimestamp
 
     // ── Page configuration ────────────────────────────────────────────────────
@@ -58,8 +60,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun disconnect() = bleManager.disconnect()
     fun reconnect()  = bleManager.reconnect()
 
-    fun getPinCode(): Int         = prefs.getInt(PREF_PIN, BleConstants.PASSKEY)
-    fun setPinCode(pin: Int)      = prefs.edit().putInt(PREF_PIN, pin).apply()
+    fun getPinCode(): Int    = prefs.getInt(PREF_PIN, BleConstants.PASSKEY)
+    fun setPinCode(pin: Int) = prefs.edit().putInt(PREF_PIN, pin).apply()
 
     override fun onCleared() {
         super.onCleared()

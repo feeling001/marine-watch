@@ -13,6 +13,7 @@ import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.google.gson.JsonSyntaxException
 import com.marinewatch.app.data.NavData
+import com.marinewatch.app.data.WindData
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,9 +23,9 @@ private const val TAG = "MarineWatch.BLE"
 /**
  * Manages the full BLE lifecycle for the Marine Gateway connection:
  *  - Scans for the device by name ([BleConstants.DEVICE_NAME])
- *  - Connects and discovers the Navigation GATT service
- *  - Enables NOTIFY on the NavData characteristic
- *  - Parses incoming JSON and exposes [navData] as a StateFlow
+ *  - Connects and discovers the Navigation and Wind GATT services
+ *  - Enables NOTIFY on the NavData and WindData characteristics
+ *  - Parses incoming JSON and exposes [navData] and [windData] as StateFlows
  *  - Auto-reconnects on link loss using exponential backoff
  *  - Detects BLE pairing events and exposes them via [connectionState]
  *
@@ -45,10 +46,6 @@ class BleManager(private val context: Context) {
     // Exponential backoff schedule
     // ----------------------------------------------------------------
 
-    /**
-     * Delay sequence in milliseconds.
-     * When [reconnectAttempt] exceeds the last index the manager gives up.
-     */
     private val BACKOFF_SCHEDULE_MS = longArrayOf(
         5_000L,
         10_000L,
@@ -58,7 +55,6 @@ class BleManager(private val context: Context) {
         300_000L
     )
 
-    /** Current position in [BACKOFF_SCHEDULE_MS]. Reset to 0 on a successful connection. */
     private var reconnectAttempt = 0
 
     // ----------------------------------------------------------------
@@ -70,6 +66,9 @@ class BleManager(private val context: Context) {
 
     private val _navData = MutableStateFlow(NavData.EMPTY)
     val navData: StateFlow<NavData> = _navData.asStateFlow()
+
+    private val _windData = MutableStateFlow(WindData.EMPTY)
+    val windData: StateFlow<WindData> = _windData.asStateFlow()
 
     /** Timestamp (System.currentTimeMillis) of the last valid NavData packet. */
     private val _lastDataTimestamp = MutableStateFlow(0L)
@@ -90,8 +89,10 @@ class BleManager(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val gson = Gson()
 
-    // Runnable reference kept so a pending reconnect can be cancelled on demand
     private var pendingReconnectRunnable: Runnable? = null
+
+    // Tracks whether the NavData CCCD write is done so we can chain the Wind CCCD write
+    private var navCccdWritten = false
 
     // ----------------------------------------------------------------
     // Public API
@@ -121,7 +122,7 @@ class BleManager(private val context: Context) {
      * an automatic reconnect. Transitions to [BleConnectionState.DISCONNECTED].
      */
     fun disconnect() {
-        isStarted = false          // suppress auto-reconnect in onConnectionStateChange
+        isStarted = false
         cancelPendingReconnect()
         stopScan()
         if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
@@ -135,7 +136,6 @@ class BleManager(private val context: Context) {
     /**
      * Stop any ongoing connection or scan and immediately restart scanning.
      * Also resets the backoff counter so reconnection starts fresh.
-     * Useful to recover from a stuck state or after the PIN has been changed.
      */
     fun reconnect() {
         Log.i(TAG, "Reconnect requested by user — resetting backoff counter")
@@ -215,8 +215,8 @@ class BleManager(private val context: Context) {
         }
         Log.i(TAG, "Connecting to ${device.address}")
         _connectionState.value = BleConnectionState.CONNECTING
+        navCccdWritten = false
 
-        // autoConnect=false for faster initial connection
         gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
@@ -226,22 +226,14 @@ class BleManager(private val context: Context) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     Log.i(TAG, "GATT connected — requesting MTU 512")
-                    // Reset backoff on successful link establishment
                     reconnectAttempt = 0
                     _connectionState.value = BleConnectionState.CONNECTING
                     if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
-                        // Request a larger MTU before service discovery.
-                        // Default BLE MTU is 23 bytes (20 usable for notify).
-                        // The ESP32 JSON payload can exceed that easily.
-                        // onMtuChanged() triggers discoverServices() once negotiated.
                         gatt.requestMtu(512)
                     }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.w(TAG, "GATT disconnected (status=$status)")
-                    // GATT status 8  = connection timeout / supervision timeout
-                    // GATT status 19 = remote device terminated connection
-                    // GATT status 133 = infamous Android BLE stack error — always retry
                     cleanupGatt()
                     if (isStarted) scheduleReconnect()
                 }
@@ -254,7 +246,6 @@ class BleManager(private val context: Context) {
             } else {
                 Log.w(TAG, "MTU negotiation failed (status=$status) — continuing with default MTU")
             }
-            // Always proceed to service discovery, whether MTU negotiation succeeded or not
             if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
                 gatt.discoverServices()
             }
@@ -268,6 +259,7 @@ class BleManager(private val context: Context) {
                 return
             }
 
+            // ── NavData ──────────────────────────────────────────────────────
             val navService = gatt.getService(BleConstants.NAV_SERVICE_UUID)
             if (navService == null) {
                 Log.e(TAG, "Navigation service not found")
@@ -286,19 +278,17 @@ class BleManager(private val context: Context) {
 
             if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return
 
-            // Enable local notification routing in the Android BLE stack
             gatt.setCharacteristicNotification(navChar, true)
 
-            // Write CCCD to instruct the peripheral to start sending notifications.
-            // API 33+ provides a non-deprecated overload that takes the value directly.
-            val descriptor = navChar.getDescriptor(BleConstants.CCCD_UUID)
-            if (descriptor != null) {
-                writeCccd(gatt, descriptor)
-                Log.i(TAG, "CCCD write initiated — awaiting NavData notifications")
+            val navDescriptor = navChar.getDescriptor(BleConstants.CCCD_UUID)
+            if (navDescriptor != null) {
+                // Write NavData CCCD first; Wind CCCD will be chained in onDescriptorWrite
+                writeCccd(gatt, navDescriptor)
+                Log.i(TAG, "NavData CCCD write initiated")
             } else {
-                // Descriptor missing — unlikely but we stay connected and try anyway
-                Log.w(TAG, "CCCD descriptor not found; notifications may not arrive")
-                _connectionState.value = BleConnectionState.CONNECTED
+                Log.w(TAG, "NavData CCCD descriptor not found — skipping to Wind CCCD")
+                navCccdWritten = true
+                subscribeToWind(gatt)
             }
         }
 
@@ -307,14 +297,30 @@ class BleManager(private val context: Context) {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
-            if (descriptor.uuid == BleConstants.CCCD_UUID) {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.i(TAG, "Notifications enabled — CONNECTED")
+            if (descriptor.uuid != BleConstants.CCCD_UUID) return
+
+            val charUuid = descriptor.characteristic.uuid
+
+            when {
+                charUuid == BleConstants.NAV_DATA_CHAR_UUID -> {
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        Log.i(TAG, "NavData notifications enabled")
+                    } else {
+                        Log.e(TAG, "Failed to write NavData CCCD: status=$status")
+                    }
+                    // Always proceed to subscribe Wind, even on error
+                    navCccdWritten = true
+                    subscribeToWind(gatt)
+                }
+
+                charUuid == BleConstants.WIND_DATA_CHAR_UUID -> {
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        Log.i(TAG, "WindData notifications enabled — CONNECTED")
+                    } else {
+                        Log.e(TAG, "Failed to write WindData CCCD: status=$status")
+                    }
+                    // Both CCCDs attempted — mark as fully connected
                     _connectionState.value = BleConnectionState.CONNECTED
-                } else {
-                    Log.e(TAG, "Failed to write CCCD: status=$status")
-                    // Do not reconnect immediately — the link is still alive.
-                    // The UI will show stale data until a reconnect is forced.
                 }
             }
         }
@@ -326,22 +332,55 @@ class BleManager(private val context: Context) {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            // Only called on API < 33
-            if (characteristic.uuid == BleConstants.NAV_DATA_CHAR_UUID) {
-                val raw = characteristic.value ?: return
-                parseNavData(raw)
+            val raw = characteristic.value ?: return
+            when (characteristic.uuid) {
+                BleConstants.NAV_DATA_CHAR_UUID  -> parseNavData(raw)
+                BleConstants.WIND_DATA_CHAR_UUID -> parseWindData(raw)
             }
         }
 
-        // Non-deprecated override introduced in API 33
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            if (characteristic.uuid == BleConstants.NAV_DATA_CHAR_UUID) {
-                parseNavData(value)
+            when (characteristic.uuid) {
+                BleConstants.NAV_DATA_CHAR_UUID  -> parseNavData(value)
+                BleConstants.WIND_DATA_CHAR_UUID -> parseWindData(value)
             }
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Wind subscription helper — called after NavData CCCD is done
+    // ----------------------------------------------------------------
+
+    private fun subscribeToWind(gatt: BluetoothGatt) {
+        if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return
+
+        val windService = gatt.getService(BleConstants.WIND_SERVICE_UUID)
+        if (windService == null) {
+            Log.w(TAG, "Wind service not found — device may not support it")
+            _connectionState.value = BleConnectionState.CONNECTED
+            return
+        }
+
+        val windChar = windService.getCharacteristic(BleConstants.WIND_DATA_CHAR_UUID)
+        if (windChar == null) {
+            Log.w(TAG, "WindData characteristic not found")
+            _connectionState.value = BleConnectionState.CONNECTED
+            return
+        }
+
+        gatt.setCharacteristicNotification(windChar, true)
+
+        val windDescriptor = windChar.getDescriptor(BleConstants.CCCD_UUID)
+        if (windDescriptor != null) {
+            writeCccd(gatt, windDescriptor)
+            Log.i(TAG, "WindData CCCD write initiated")
+        } else {
+            Log.w(TAG, "WindData CCCD descriptor not found; wind notifications may not arrive")
+            _connectionState.value = BleConnectionState.CONNECTED
         }
     }
 
@@ -349,25 +388,14 @@ class BleManager(private val context: Context) {
     // CCCD write — non-deprecated path for API 33+, legacy for API < 33
     // ----------------------------------------------------------------
 
-    /**
-     * Writes [BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE] to [descriptor].
-     *
-     * On API ≥ 33 the new [BluetoothGatt.writeDescriptor] overload that accepts
-     * a [ByteArray] directly is used, avoiding the deprecated setter on
-     * [BluetoothGattDescriptor.value].
-     *
-     * On API < 33 the classic approach is used as a fallback.
-     */
     @Suppress("DEPRECATION")
     private fun writeCccd(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // API 33+ — non-deprecated overload
             gatt.writeDescriptor(
                 descriptor,
                 BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             )
         } else {
-            // API < 33 — classic approach (deprecated since API 33 but still functional)
             descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             gatt.writeDescriptor(descriptor)
         }
@@ -375,41 +403,8 @@ class BleManager(private val context: Context) {
 
     // ----------------------------------------------------------------
     // Pairing / bonding detection
-    //
-    // The Android BLE stack handles the pairing dialog automatically;
-    // there is no GATT callback for it. We detect the pairing window by
-    // listening to BluetoothDevice.ACTION_BOND_STATE_CHANGED via a
-    // BroadcastReceiver registered in the companion object, and by
-    // checking the bond state when a CONNECTING transition occurs.
-    //
-    // The simpler approach used here: expose PAIRING state during the
-    // CONNECTING window when the remote device is already in the
-    // BOND_BONDING state. The OS shows the pairing dialog then.
     // ----------------------------------------------------------------
 
-    /**
-     * BroadcastReceiver that listens for bond state changes and updates
-     * [_connectionState] to [BleConnectionState.PAIRING] when the OS
-     * pairing dialog is active.
-     *
-     * Register this receiver in [MainActivity.onCreate] with
-     * `IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)` and
-     * unregister it in `onDestroy`.
-     *
-     * Example (in MainActivity):
-     * ```kotlin
-     * private val bondReceiver = bleManager.createBondStateReceiver()
-     *
-     * override fun onCreate(...) {
-     *     registerReceiver(bondReceiver,
-     *         IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED))
-     * }
-     * override fun onDestroy() {
-     *     unregisterReceiver(bondReceiver)
-     *     super.onDestroy()
-     * }
-     * ```
-     */
     fun createBondStateReceiver(): android.content.BroadcastReceiver =
         object : android.content.BroadcastReceiver() {
             override fun onReceive(context: Context, intent: android.content.Intent) {
@@ -428,12 +423,10 @@ class BleManager(private val context: Context) {
 
                 when (bondState) {
                     BluetoothDevice.BOND_BONDING -> {
-                        // OS pairing dialog is now visible to the user
                         Log.i(TAG, "Pairing in progress — showing PAIRING state")
                         _connectionState.value = BleConnectionState.PAIRING
                     }
                     BluetoothDevice.BOND_BONDED -> {
-                        // Pairing completed successfully — resume normal connection flow
                         Log.i(TAG, "Pairing successful (BOND_BONDED)")
                         if (_connectionState.value == BleConnectionState.PAIRING) {
                             _connectionState.value = BleConnectionState.CONNECTING
@@ -441,7 +434,6 @@ class BleManager(private val context: Context) {
                     }
                     BluetoothDevice.BOND_NONE -> {
                         if (previousBondState == BluetoothDevice.BOND_BONDING) {
-                            // User cancelled or pairing failed
                             Log.w(TAG, "Pairing failed or cancelled")
                             _connectionState.value = BleConnectionState.DISCONNECTED
                         }
@@ -463,7 +455,20 @@ class BleManager(private val context: Context) {
             _lastDataTimestamp.value = System.currentTimeMillis()
             Log.d(TAG, "NavData parsed OK: stw=${data.stw} depth=${data.depth} cog=${data.cog} sog=${data.sog}")
         } catch (e: JsonSyntaxException) {
-            Log.e(TAG, "JSON parse error (${bytes.size} bytes, likely truncated by MTU): ${e.message}")
+            Log.e(TAG, "NavData JSON parse error: ${e.message}")
+            Log.e(TAG, "Raw bytes (hex): ${bytes.joinToString(" ") { "%02X".format(it) }}")
+        }
+    }
+
+    private fun parseWindData(bytes: ByteArray) {
+        val json = bytes.toString(Charsets.UTF_8)
+        Log.d(TAG, "WindData received: ${bytes.size} bytes → $json")
+        try {
+            val data = gson.fromJson(json, WindData::class.java)
+            _windData.value = data
+            Log.d(TAG, "WindData parsed OK: aws=${data.aws} awa=${data.awa} tws=${data.tws} twa=${data.twa} twd=${data.twd}")
+        } catch (e: JsonSyntaxException) {
+            Log.e(TAG, "WindData JSON parse error: ${e.message}")
             Log.e(TAG, "Raw bytes (hex): ${bytes.joinToString(" ") { "%02X".format(it) }}")
         }
     }
@@ -472,30 +477,16 @@ class BleManager(private val context: Context) {
     // Reconnection with exponential backoff
     // ----------------------------------------------------------------
 
-    /**
-     * Schedules a reconnection attempt using the exponential backoff schedule.
-     *
-     * If [reconnectAttempt] has exceeded the last index of [BACKOFF_SCHEDULE_MS],
-     * the manager gives up and transitions to [BleConnectionState.DISCONNECTED].
-     * The user must then trigger [reconnect] manually.
-     */
     private fun scheduleReconnect() {
         if (reconnectAttempt >= BACKOFF_SCHEDULE_MS.size) {
-            Log.w(
-                TAG,
-                "All ${BACKOFF_SCHEDULE_MS.size} reconnection attempts exhausted — giving up"
-            )
+            Log.w(TAG, "All ${BACKOFF_SCHEDULE_MS.size} reconnection attempts exhausted — giving up")
             _connectionState.value = BleConnectionState.DISCONNECTED
             isStarted = false
             return
         }
 
         val delayMs = BACKOFF_SCHEDULE_MS[reconnectAttempt]
-        Log.i(
-            TAG,
-            "Reconnect attempt ${reconnectAttempt + 1}/${BACKOFF_SCHEDULE_MS.size} " +
-                    "scheduled in ${delayMs / 1000} s"
-        )
+        Log.i(TAG, "Reconnect attempt ${reconnectAttempt + 1}/${BACKOFF_SCHEDULE_MS.size} scheduled in ${delayMs / 1000} s")
         _connectionState.value = BleConnectionState.RECONNECTING
 
         val runnable = Runnable {
@@ -509,7 +500,6 @@ class BleManager(private val context: Context) {
         mainHandler.postDelayed(runnable, delayMs)
     }
 
-    /** Cancel any reconnect that is waiting in the handler queue. */
     private fun cancelPendingReconnect() {
         pendingReconnectRunnable?.let {
             mainHandler.removeCallbacks(it)
@@ -536,6 +526,7 @@ class BleManager(private val context: Context) {
             }
         }
         gatt = null
+        navCccdWritten = false
     }
 
     private fun hasPermission(permission: String): Boolean =
