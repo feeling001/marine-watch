@@ -18,25 +18,12 @@ import com.marinewatch.app.ui.MarineDisplay
 
 private const val TAG = "MarineWatch.Main"
 
-/**
- * Single-activity entry point for the Marine Watch application.
- *
- * Responsibilities:
- *  1. Request BLE runtime permissions (Android 12+ requires BLUETOOTH_SCAN + BLUETOOTH_CONNECT)
- *  2. Register an [AmbientLifecycleObserver] to switch the display between
- *     interactive and always-on (ambient) modes
- *  3. Register the BLE bond state [BroadcastReceiver] so that the PAIRING
- *     connection state is surfaced correctly in the UI
- *  4. Start the BleManager once permissions are confirmed
- */
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
 
-    // Tracks ambient mode state, observed by Compose
     private var isAmbient by mutableStateOf(false)
 
-    // Bond state receiver — created lazily from BleManager and kept for unregistration
     private val bondReceiver by lazy { viewModel.bleManager.createBondStateReceiver() }
 
     // ----------------------------------------------------------------
@@ -65,8 +52,13 @@ class MainActivity : ComponentActivity() {
 
     // ----------------------------------------------------------------
     // Permission launcher
+    //
+    // @Suppress: lint incorrectly flags registerForActivityResult as requiring
+    // Fragment 1.3.0, but MainActivity extends ComponentActivity (not FragmentActivity).
+    // This is a known AGP lint false positive — the restriction does not apply here.
     // ----------------------------------------------------------------
 
+    @Suppress("InvalidFragmentVersionForActivityResult")
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
@@ -76,7 +68,6 @@ class MainActivity : ComponentActivity() {
             viewModel.startBle()
         } else {
             Log.w(TAG, "Some BLE permissions denied: $results")
-            // App will show a disconnected state; user can grant permissions in Settings
         }
     }
 
@@ -87,18 +78,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Register ambient lifecycle
         lifecycle.addObserver(ambientObserver)
 
-        // Register bond state receiver so PAIRING state is surfaced in the UI.
-        // The receiver is safe to register before BLE starts — it only reacts to
-        // system intents and does nothing until a pairing dialog appears.
         registerReceiver(
             bondReceiver,
             IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
         )
 
-        // Set up Compose UI
         setContent {
             MarineDisplay(
                 viewModel = viewModel,
@@ -106,13 +92,11 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        // Request permissions then start BLE
         requestBlePermissions()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // Always unregister to avoid a leaked IntentFilter reference
         try {
             unregisterReceiver(bondReceiver)
         } catch (e: IllegalArgumentException) {
@@ -127,11 +111,9 @@ class MainActivity : ComponentActivity() {
     private fun requestBlePermissions() {
         val required = buildList {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                // Android 12+ (API 31+): new granular permissions
                 add(Manifest.permission.BLUETOOTH_SCAN)
                 add(Manifest.permission.BLUETOOTH_CONNECT)
             } else {
-                // Android 11 and below
                 add(Manifest.permission.BLUETOOTH)
                 add(Manifest.permission.BLUETOOTH_ADMIN)
                 add(Manifest.permission.ACCESS_FINE_LOCATION)

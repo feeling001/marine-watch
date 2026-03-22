@@ -40,7 +40,10 @@ private val ColorAmbientLabel = Color(0xFF455A64)
 private val ColorSuccess      = Color(0xFF69F0AE)
 private val ColorDanger       = Color(0xFFFF5252)
 
-private val TOTAL_PAGES      = DATA_PAGE_COUNT + 1
+/** Total number of swipable pages: DATA_PAGE_COUNT data pages + 1 config page. */
+private val TOTAL_PAGES = DATA_PAGE_COUNT + 1
+
+/** Index of the config page (last page). */
 private val CONFIG_PAGE_INDEX = DATA_PAGE_COUNT
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,6 +66,15 @@ private fun dataFreshness(lastTs: Long): DataFreshness {
 // Root composable
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Root display composable.
+ *
+ * Layout:
+ *  - When BLE state is not CONNECTED → full-screen status overlay (no pager).
+ *  - When CONNECTED → [HorizontalPager] with [TOTAL_PAGES] pages:
+ *      pages 0–[DATA_PAGE_COUNT-1] : configurable 2×2 data grids
+ *      page  [CONFIG_PAGE_INDEX]   : page-layout configuration UI + Settings link
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MarineDisplay(
@@ -81,18 +93,14 @@ fun MarineDisplay(
 
     val state       by viewModel.connectionState.collectAsState()
     val nav         by viewModel.navData.collectAsState()
-    val wind        by viewModel.windData.collectAsState()          // ← wind data
+    val perf        by viewModel.perfData.collectAsState()
     val lastTs      by viewModel.lastDataTimestamp.collectAsState()
     val pageConfigs by viewModel.pageConfigs.collectAsState()
 
     val freshness   = remember(lastTs) { dataFreshness(lastTs) }
-    // Wind is null when EMPTY (no packet yet) so the UI shows "---" for wind fields
-    // rather than stale zeros. We pass null when all wind fields are null.
-    val windOrNull  = remember(wind) {
-        if (wind.aws == null && wind.awa == null && wind.tws == null &&
-            wind.twa == null && wind.twd == null) null else wind
-    }
-    val displayData = remember(nav, windOrNull) { DisplayData(nav = nav, wind = windOrNull) }
+
+    // Combine nav + perf into a single DisplayData snapshot for the grid
+    val displayData = remember(nav, perf) { DisplayData(nav = nav, perf = perf) }
 
     Box(
         modifier         = Modifier
@@ -117,7 +125,7 @@ fun MarineDisplay(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main pager
+// Main pager — always rendered
 // ─────────────────────────────────────────────────────────────────────────────
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -174,8 +182,8 @@ private fun MainPager(
                         modifier = Modifier
                             .size(if (isSelected) 6.dp else 5.dp)
                             .background(
-                                color = if (isSelected) ColorAccent else ColorLabel.copy(alpha = 0.4f),
-                                shape = RoundedCornerShape(50)
+                                color  = if (isSelected) ColorAccent else ColorLabel.copy(alpha = 0.4f),
+                                shape  = RoundedCornerShape(50)
                             )
                     )
                 }
@@ -261,21 +269,41 @@ internal fun NavGrid(
         }
 
         Row(
-            modifier              = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly
+            modifier                = Modifier.fillMaxWidth(),
+            horizontalArrangement   = Arrangement.SpaceEvenly
         ) {
-            DataTile(field = config.slots[0], data = displayData, valueColor = valueColor, labelColor = labelColor)
-            DataTile(field = config.slots[1], data = displayData, valueColor = valueColor, labelColor = labelColor)
+            DataTile(
+                field      = config.slots[0],
+                data       = displayData,
+                valueColor = valueColor,
+                labelColor = labelColor
+            )
+            DataTile(
+                field      = config.slots[1],
+                data       = displayData,
+                valueColor = valueColor,
+                labelColor = labelColor
+            )
         }
 
         if (!isAmbient) Spacer(modifier = Modifier.height(4.dp))
 
         Row(
-            modifier              = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly
+            modifier                = Modifier.fillMaxWidth(),
+            horizontalArrangement   = Arrangement.SpaceEvenly
         ) {
-            DataTile(field = config.slots[2], data = displayData, valueColor = valueColor, labelColor = labelColor)
-            DataTile(field = config.slots[3], data = displayData, valueColor = valueColor, labelColor = labelColor)
+            DataTile(
+                field      = config.slots[2],
+                data       = displayData,
+                valueColor = valueColor,
+                labelColor = labelColor
+            )
+            DataTile(
+                field      = config.slots[3],
+                data       = displayData,
+                valueColor = valueColor,
+                labelColor = labelColor
+            )
         }
     }
 }
@@ -316,7 +344,7 @@ internal fun DataTile(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Config page
+// Config page (last page)
 // ─────────────────────────────────────────────────────────────────────────────
 
 @Composable
@@ -344,8 +372,8 @@ private fun ConfigPage(
         repeat(DATA_PAGE_COUNT) { pageIndex ->
             item {
                 PageSlotEditor(
-                    pageIndex    = pageIndex,
-                    config       = pageConfigs[pageIndex],
+                    pageIndex   = pageIndex,
+                    config      = pageConfigs[pageIndex],
                     onSlotChange = { slotIndex, field ->
                         viewModel.updateSlot(pageIndex, slotIndex, field)
                     }
@@ -357,12 +385,12 @@ private fun ConfigPage(
 
         item {
             Chip(
-                modifier = Modifier.fillMaxWidth().height(36.dp),
-                onClick  = onOpenSettings,
-                colors   = ChipDefaults.chipColors(
+                modifier  = Modifier.fillMaxWidth().height(36.dp),
+                onClick   = onOpenSettings,
+                colors    = ChipDefaults.chipColors(
                     backgroundColor = ColorAccent.copy(alpha = 0.13f)
                 ),
-                label    = {
+                label     = {
                     Text(
                         text      = "BLE Settings",
                         color     = ColorAccent,
@@ -398,16 +426,38 @@ private fun PageSlotEditor(
             modifier      = Modifier.padding(bottom = 8.dp)
         )
 
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            SlotPicker(label = "TL", current = config.slots[0], onFieldChange = { onSlotChange(0, it) })
-            SlotPicker(label = "TR", current = config.slots[1], onFieldChange = { onSlotChange(1, it) })
+        Row(
+            modifier              = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            SlotPicker(
+                label         = "TL",
+                current       = config.slots[0],
+                onFieldChange = { onSlotChange(0, it) }
+            )
+            SlotPicker(
+                label         = "TR",
+                current       = config.slots[1],
+                onFieldChange = { onSlotChange(1, it) }
+            )
         }
 
         Spacer(Modifier.height(6.dp))
 
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            SlotPicker(label = "BL", current = config.slots[2], onFieldChange = { onSlotChange(2, it) })
-            SlotPicker(label = "BR", current = config.slots[3], onFieldChange = { onSlotChange(3, it) })
+        Row(
+            modifier              = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            SlotPicker(
+                label         = "BL",
+                current       = config.slots[2],
+                onFieldChange = { onSlotChange(2, it) }
+            )
+            SlotPicker(
+                label         = "BR",
+                current       = config.slots[3],
+                onFieldChange = { onSlotChange(3, it) }
+            )
         }
     }
 }
@@ -425,7 +475,12 @@ private fun SlotPicker(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier            = Modifier.width(64.dp)
     ) {
-        Text(text = label, color = ColorLabel, fontSize = 8.sp, modifier = Modifier.padding(bottom = 2.dp))
+        Text(
+            text      = label,
+            color     = ColorLabel,
+            fontSize  = 8.sp,
+            modifier  = Modifier.padding(bottom = 2.dp)
+        )
         Row(
             verticalAlignment     = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -435,7 +490,9 @@ private fun SlotPicker(
                 modifier = Modifier.size(22.dp),
                 onClick  = { onFieldChange(fields[(idx - 1 + fields.size) % fields.size]) },
                 colors   = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1C2A30))
-            ) { Text("◀", fontSize = 7.sp, color = ColorLabel) }
+            ) {
+                Text("◀", fontSize = 7.sp, color = ColorLabel)
+            }
 
             Text(
                 text       = if (current == DataField.EMPTY) "—" else current.label,
@@ -450,10 +507,17 @@ private fun SlotPicker(
                 modifier = Modifier.size(22.dp),
                 onClick  = { onFieldChange(fields[(idx + 1) % fields.size]) },
                 colors   = ButtonDefaults.buttonColors(backgroundColor = Color(0xFF1C2A30))
-            ) { Text("▶", fontSize = 7.sp, color = ColorLabel) }
+            ) {
+                Text("▶", fontSize = 7.sp, color = ColorLabel)
+            }
         }
 
-        Text(text = current.unit, color = ColorLabel, fontSize = 8.sp, modifier = Modifier.padding(top = 1.dp))
+        Text(
+            text     = current.unit,
+            color    = ColorLabel,
+            fontSize = 8.sp,
+            modifier = Modifier.padding(top = 1.dp)
+        )
     }
 }
 
@@ -464,7 +528,11 @@ private fun SlotPicker(
 @Composable
 fun ConnectingScreen(state: BleConnectionState) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp, indicatorColor = ColorAccent)
+        CircularProgressIndicator(
+            modifier       = Modifier.size(32.dp),
+            strokeWidth    = 3.dp,
+            indicatorColor = ColorAccent
+        )
         Spacer(Modifier.height(8.dp))
         Text(
             text     = when (state) {
@@ -483,8 +551,17 @@ fun ReconnectingScreen() {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text("⚓", fontSize = 28.sp)
         Spacer(Modifier.height(6.dp))
-        Text(text = "Signal lost", color = ColorWarning, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        Text(text = "Reconnecting…", color = ColorLabel, fontSize = 11.sp)
+        Text(
+            text       = "Signal lost",
+            color      = ColorWarning,
+            fontSize   = 13.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text     = "Reconnecting…",
+            color    = ColorLabel,
+            fontSize = 11.sp
+        )
     }
 }
 
@@ -496,9 +573,19 @@ fun PairingScreen() {
     ) {
         Text("🔒", fontSize = 24.sp)
         Spacer(Modifier.height(6.dp))
-        Text(text = "Pairing", color = ColorAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        Text(
+            text       = "Pairing",
+            color      = ColorAccent,
+            fontSize   = 14.sp,
+            fontWeight = FontWeight.Bold
+        )
         Spacer(Modifier.height(4.dp))
-        Text(text = "Enter PIN shown\non the device", color = ColorLabel, fontSize = 11.sp, textAlign = TextAlign.Center)
+        Text(
+            text      = "Enter PIN shown\non the device",
+            color     = ColorLabel,
+            fontSize  = 11.sp,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
@@ -507,7 +594,11 @@ fun DisconnectedScreen() {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text("📡", fontSize = 28.sp)
         Spacer(Modifier.height(6.dp))
-        Text(text = "Disconnected", color = ColorWarning, fontSize = 13.sp)
+        Text(
+            text     = "Disconnected",
+            color    = ColorWarning,
+            fontSize = 13.sp
+        )
     }
 }
 
@@ -516,12 +607,25 @@ fun StaleOverlay() {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text("⏳", fontSize = 28.sp)
         Spacer(Modifier.height(6.dp))
-        Text(text = "No data", color = ColorWarning, fontSize = 13.sp)
-        Text(text = "Check ESP32", color = ColorLabel, fontSize = 11.sp)
+        Text(
+            text     = "No data",
+            color    = ColorWarning,
+            fontSize = 13.sp
+        )
+        Text(
+            text     = "Check ESP32",
+            color    = ColorLabel,
+            fontSize = 11.sp
+        )
     }
 }
 
 @Composable
 fun AmbientOfflineIndicator() {
-    Text(text = "- OFFLINE -", color = ColorAmbientLabel, fontSize = 11.sp, letterSpacing = 2.sp)
+    Text(
+        text          = "- OFFLINE -",
+        color         = ColorAmbientLabel,
+        fontSize      = 11.sp,
+        letterSpacing = 2.sp
+    )
 }

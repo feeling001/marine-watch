@@ -13,7 +13,7 @@ import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.google.gson.JsonSyntaxException
 import com.marinewatch.app.data.NavData
-import com.marinewatch.app.data.WindData
+import com.marinewatch.app.data.PerformanceData
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,9 +23,9 @@ private const val TAG = "MarineWatch.BLE"
 /**
  * Manages the full BLE lifecycle for the Marine Gateway connection:
  *  - Scans for the device by name ([BleConstants.DEVICE_NAME])
- *  - Connects and discovers the Navigation and Wind GATT services
- *  - Enables NOTIFY on the NavData and WindData characteristics
- *  - Parses incoming JSON and exposes [navData] and [windData] as StateFlows
+ *  - Connects and discovers the Navigation + Sail Performance GATT services
+ *  - Enables NOTIFY on NavData and PerformanceData characteristics
+ *  - Parses incoming JSON and exposes [navData] and [perfData] as StateFlows
  *  - Auto-reconnects on link loss using exponential backoff
  *  - Detects BLE pairing events and exposes them via [connectionState]
  *
@@ -67,8 +67,8 @@ class BleManager(private val context: Context) {
     private val _navData = MutableStateFlow(NavData.EMPTY)
     val navData: StateFlow<NavData> = _navData.asStateFlow()
 
-    private val _windData = MutableStateFlow(WindData.EMPTY)
-    val windData: StateFlow<WindData> = _windData.asStateFlow()
+    private val _perfData = MutableStateFlow(PerformanceData.EMPTY)
+    val perfData: StateFlow<PerformanceData> = _perfData.asStateFlow()
 
     /** Timestamp (System.currentTimeMillis) of the last valid NavData packet. */
     private val _lastDataTimestamp = MutableStateFlow(0L)
@@ -91,8 +91,14 @@ class BleManager(private val context: Context) {
 
     private var pendingReconnectRunnable: Runnable? = null
 
-    // Tracks whether the NavData CCCD write is done so we can chain the Wind CCCD write
-    private var navCccdWritten = false
+    /**
+     * Tracks CCCD write operations when multiple characteristics need notifications.
+     * We must write CCCDs sequentially — one at a time — because the Android BLE
+     * stack does not support concurrent descriptor writes. After each [onDescriptorWrite]
+     * callback we pop the next entry from this queue and write it.
+     */
+    private val cccdQueue: ArrayDeque<Pair<BluetoothGattCharacteristic, BluetoothGattDescriptor>> =
+        ArrayDeque()
 
     // ----------------------------------------------------------------
     // Public API
@@ -117,10 +123,6 @@ class BleManager(private val context: Context) {
         Log.i(TAG, "BleManager stopped")
     }
 
-    /**
-     * Gracefully terminate the active GATT connection without scheduling
-     * an automatic reconnect. Transitions to [BleConnectionState.DISCONNECTED].
-     */
     fun disconnect() {
         isStarted = false
         cancelPendingReconnect()
@@ -133,10 +135,6 @@ class BleManager(private val context: Context) {
         Log.i(TAG, "Disconnected by user request")
     }
 
-    /**
-     * Stop any ongoing connection or scan and immediately restart scanning.
-     * Also resets the backoff counter so reconnection starts fresh.
-     */
     fun reconnect() {
         Log.i(TAG, "Reconnect requested by user — resetting backoff counter")
         cancelPendingReconnect()
@@ -215,8 +213,6 @@ class BleManager(private val context: Context) {
         }
         Log.i(TAG, "Connecting to ${device.address}")
         _connectionState.value = BleConnectionState.CONNECTING
-        navCccdWritten = false
-
         gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
@@ -259,7 +255,10 @@ class BleManager(private val context: Context) {
                 return
             }
 
-            // ── NavData ──────────────────────────────────────────────────────
+            // Build the sequential CCCD write queue
+            cccdQueue.clear()
+
+            // ── Navigation service ──────────────────────────────────────────
             val navService = gatt.getService(BleConstants.NAV_SERVICE_UUID)
             if (navService == null) {
                 Log.e(TAG, "Navigation service not found")
@@ -267,7 +266,6 @@ class BleManager(private val context: Context) {
                 scheduleReconnect()
                 return
             }
-
             val navChar = navService.getCharacteristic(BleConstants.NAV_DATA_CHAR_UUID)
             if (navChar == null) {
                 Log.e(TAG, "NavData characteristic not found")
@@ -277,19 +275,29 @@ class BleManager(private val context: Context) {
             }
 
             if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return
-
             gatt.setCharacteristicNotification(navChar, true)
+            navChar.getDescriptor(BleConstants.CCCD_UUID)?.let {
+                cccdQueue.addLast(navChar to it)
+            } ?: Log.w(TAG, "NavData CCCD descriptor not found")
 
-            val navDescriptor = navChar.getDescriptor(BleConstants.CCCD_UUID)
-            if (navDescriptor != null) {
-                // Write NavData CCCD first; Wind CCCD will be chained in onDescriptorWrite
-                writeCccd(gatt, navDescriptor)
-                Log.i(TAG, "NavData CCCD write initiated")
+            // ── Sail Performance service (optional — graceful if absent) ────
+            val perfService = gatt.getService(BleConstants.PERF_SERVICE_UUID)
+            if (perfService != null) {
+                val perfChar = perfService.getCharacteristic(BleConstants.PERF_DATA_CHAR_UUID)
+                if (perfChar != null) {
+                    gatt.setCharacteristicNotification(perfChar, true)
+                    perfChar.getDescriptor(BleConstants.CCCD_UUID)?.let {
+                        cccdQueue.addLast(perfChar to it)
+                    } ?: Log.w(TAG, "PerformanceData CCCD descriptor not found")
+                } else {
+                    Log.w(TAG, "PerformanceData characteristic not found — performance data unavailable")
+                }
             } else {
-                Log.w(TAG, "NavData CCCD descriptor not found — skipping to Wind CCCD")
-                navCccdWritten = true
-                subscribeToWind(gatt)
+                Log.w(TAG, "Sail Performance service not found — performance data unavailable")
             }
+
+            // Kick off the sequential CCCD write chain
+            writeNextCccd(gatt)
         }
 
         override fun onDescriptorWrite(
@@ -297,31 +305,14 @@ class BleManager(private val context: Context) {
             descriptor: BluetoothGattDescriptor,
             status: Int
         ) {
-            if (descriptor.uuid != BleConstants.CCCD_UUID) return
-
-            val charUuid = descriptor.characteristic.uuid
-
-            when {
-                charUuid == BleConstants.NAV_DATA_CHAR_UUID -> {
-                    if (status == BluetoothGatt.GATT_SUCCESS) {
-                        Log.i(TAG, "NavData notifications enabled")
-                    } else {
-                        Log.e(TAG, "Failed to write NavData CCCD: status=$status")
-                    }
-                    // Always proceed to subscribe Wind, even on error
-                    navCccdWritten = true
-                    subscribeToWind(gatt)
+            if (descriptor.uuid == BleConstants.CCCD_UUID) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    Log.i(TAG, "CCCD written successfully for ${descriptor.characteristic.uuid}")
+                } else {
+                    Log.e(TAG, "Failed to write CCCD for ${descriptor.characteristic.uuid}: status=$status")
                 }
-
-                charUuid == BleConstants.WIND_DATA_CHAR_UUID -> {
-                    if (status == BluetoothGatt.GATT_SUCCESS) {
-                        Log.i(TAG, "WindData notifications enabled — CONNECTED")
-                    } else {
-                        Log.e(TAG, "Failed to write WindData CCCD: status=$status")
-                    }
-                    // Both CCCDs attempted — mark as fully connected
-                    _connectionState.value = BleConnectionState.CONNECTED
-                }
+                // Write the next CCCD in the queue, or mark CONNECTED if done
+                writeNextCccd(gatt)
             }
         }
 
@@ -333,10 +324,7 @@ class BleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic
         ) {
             val raw = characteristic.value ?: return
-            when (characteristic.uuid) {
-                BleConstants.NAV_DATA_CHAR_UUID  -> parseNavData(raw)
-                BleConstants.WIND_DATA_CHAR_UUID -> parseWindData(raw)
-            }
+            dispatchCharacteristicValue(characteristic.uuid, raw)
         }
 
         override fun onCharacteristicChanged(
@@ -344,43 +332,41 @@ class BleManager(private val context: Context) {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            when (characteristic.uuid) {
-                BleConstants.NAV_DATA_CHAR_UUID  -> parseNavData(value)
-                BleConstants.WIND_DATA_CHAR_UUID -> parseWindData(value)
-            }
+            dispatchCharacteristicValue(characteristic.uuid, value)
         }
     }
 
     // ----------------------------------------------------------------
-    // Wind subscription helper — called after NavData CCCD is done
+    // Sequential CCCD write queue
     // ----------------------------------------------------------------
 
-    private fun subscribeToWind(gatt: BluetoothGatt) {
+    /**
+     * Writes the CCCD for the next characteristic in [cccdQueue].
+     * If the queue is empty, all notifications are enabled and we
+     * transition to [BleConnectionState.CONNECTED].
+     */
+    private fun writeNextCccd(gatt: BluetoothGatt) {
         if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return
-
-        val windService = gatt.getService(BleConstants.WIND_SERVICE_UUID)
-        if (windService == null) {
-            Log.w(TAG, "Wind service not found — device may not support it")
+        val next = cccdQueue.removeFirstOrNull()
+        if (next == null) {
+            // All CCCDs written — fully connected
+            Log.i(TAG, "All CCCD writes complete — CONNECTED")
             _connectionState.value = BleConnectionState.CONNECTED
             return
         }
+        val (_, descriptor) = next
+        Log.i(TAG, "Writing CCCD for ${descriptor.characteristic.uuid}")
+        writeCccd(gatt, descriptor)
+    }
 
-        val windChar = windService.getCharacteristic(BleConstants.WIND_DATA_CHAR_UUID)
-        if (windChar == null) {
-            Log.w(TAG, "WindData characteristic not found")
-            _connectionState.value = BleConnectionState.CONNECTED
-            return
-        }
+    // ----------------------------------------------------------------
+    // Characteristic dispatch
+    // ----------------------------------------------------------------
 
-        gatt.setCharacteristicNotification(windChar, true)
-
-        val windDescriptor = windChar.getDescriptor(BleConstants.CCCD_UUID)
-        if (windDescriptor != null) {
-            writeCccd(gatt, windDescriptor)
-            Log.i(TAG, "WindData CCCD write initiated")
-        } else {
-            Log.w(TAG, "WindData CCCD descriptor not found; wind notifications may not arrive")
-            _connectionState.value = BleConnectionState.CONNECTED
+    private fun dispatchCharacteristicValue(uuid: java.util.UUID, value: ByteArray) {
+        when (uuid) {
+            BleConstants.NAV_DATA_CHAR_UUID  -> parseNavData(value)
+            BleConstants.PERF_DATA_CHAR_UUID -> parsePerfData(value)
         }
     }
 
@@ -455,20 +441,20 @@ class BleManager(private val context: Context) {
             _lastDataTimestamp.value = System.currentTimeMillis()
             Log.d(TAG, "NavData parsed OK: stw=${data.stw} depth=${data.depth} cog=${data.cog} sog=${data.sog}")
         } catch (e: JsonSyntaxException) {
-            Log.e(TAG, "NavData JSON parse error: ${e.message}")
+            Log.e(TAG, "NavData JSON parse error (${bytes.size} bytes): ${e.message}")
             Log.e(TAG, "Raw bytes (hex): ${bytes.joinToString(" ") { "%02X".format(it) }}")
         }
     }
 
-    private fun parseWindData(bytes: ByteArray) {
+    private fun parsePerfData(bytes: ByteArray) {
         val json = bytes.toString(Charsets.UTF_8)
-        Log.d(TAG, "WindData received: ${bytes.size} bytes → $json")
+        Log.d(TAG, "PerfData received: ${bytes.size} bytes → $json")
         try {
-            val data = gson.fromJson(json, WindData::class.java)
-            _windData.value = data
-            Log.d(TAG, "WindData parsed OK: aws=${data.aws} awa=${data.awa} tws=${data.tws} twa=${data.twa} twd=${data.twd}")
+            val data = gson.fromJson(json, PerformanceData::class.java)
+            _perfData.value = data
+            Log.d(TAG, "PerfData parsed OK: vmg=${data.vmg} polar_pct=${data.polarPct} target_stw=${data.targetStw} polar_loaded=${data.polarLoaded}")
         } catch (e: JsonSyntaxException) {
-            Log.e(TAG, "WindData JSON parse error: ${e.message}")
+            Log.e(TAG, "PerfData JSON parse error (${bytes.size} bytes): ${e.message}")
             Log.e(TAG, "Raw bytes (hex): ${bytes.joinToString(" ") { "%02X".format(it) }}")
         }
     }
@@ -479,14 +465,21 @@ class BleManager(private val context: Context) {
 
     private fun scheduleReconnect() {
         if (reconnectAttempt >= BACKOFF_SCHEDULE_MS.size) {
-            Log.w(TAG, "All ${BACKOFF_SCHEDULE_MS.size} reconnection attempts exhausted — giving up")
+            Log.w(
+                TAG,
+                "All ${BACKOFF_SCHEDULE_MS.size} reconnection attempts exhausted — giving up"
+            )
             _connectionState.value = BleConnectionState.DISCONNECTED
             isStarted = false
             return
         }
 
         val delayMs = BACKOFF_SCHEDULE_MS[reconnectAttempt]
-        Log.i(TAG, "Reconnect attempt ${reconnectAttempt + 1}/${BACKOFF_SCHEDULE_MS.size} scheduled in ${delayMs / 1000} s")
+        Log.i(
+            TAG,
+            "Reconnect attempt ${reconnectAttempt + 1}/${BACKOFF_SCHEDULE_MS.size} " +
+                    "scheduled in ${delayMs / 1000} s"
+        )
         _connectionState.value = BleConnectionState.RECONNECTING
 
         val runnable = Runnable {
@@ -513,6 +506,7 @@ class BleManager(private val context: Context) {
     // ----------------------------------------------------------------
 
     private fun cleanupGatt() {
+        cccdQueue.clear()
         closeGatt()
         _connectionState.value = BleConnectionState.RECONNECTING
     }
@@ -526,7 +520,6 @@ class BleManager(private val context: Context) {
             }
         }
         gatt = null
-        navCccdWritten = false
     }
 
     private fun hasPermission(permission: String): Boolean =

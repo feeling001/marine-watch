@@ -30,34 +30,45 @@ object BleConstants {
      * NavData characteristic UUID.
      * Properties: READ + NOTIFY.
      * Payload: UTF-8 JSON, updated at 1 Hz.
+     *
+     * JSON shape:
+     * {
+     *   "lat": Float|null,
+     *   "lon": Float|null,
+     *   "sog": Float|null,   // Speed Over Ground, knots
+     *   "cog": Float|null,   // Course Over Ground, 0–360 °
+     *   "stw": Float|null,   // Speed Through Water, knots
+     *   "hdg_mag": Float|null,
+     *   "hdg_true": Float|null,
+     *   "depth": Float|null  // Depth below transducer, metres
+     * }
      */
     val NAV_DATA_CHAR_UUID: UUID =
         UUID.fromString("4d475743-0101-4e41-5649-474154494f4e")
 
     // ----------------------------------------------------------------
-    // Wind Service
+    // Sail Performance Service
     // ----------------------------------------------------------------
 
-    /** Wind GATT service UUID */
-    val WIND_SERVICE_UUID: UUID =
-        UUID.fromString("4d475743-0002-4e41-5649-474154494f4e")
+    /** Sail Performance GATT service UUID */
+    val PERF_SERVICE_UUID: UUID =
+        UUID.fromString("4d475743-0004-4e41-5649-474154494f4e")
 
     /**
-     * WindData characteristic UUID.
+     * PerformanceData characteristic UUID.
      * Properties: READ + NOTIFY.
      * Payload: UTF-8 JSON, updated at 1 Hz.
      *
      * JSON shape:
      * {
-     *   "aws": Float|null,   // Apparent Wind Speed, knots
-     *   "awa": Float|null,   // Apparent Wind Angle, degrees (-180 to +180, + = starboard)
-     *   "tws": Float|null,   // True Wind Speed, knots
-     *   "twa": Float|null,   // True Wind Angle, degrees (-180 to +180)
-     *   "twd": Float|null    // True Wind Direction, degrees true (0-360)
+     *   "vmg": Float|null,        // Velocity Made Good, knots. Positive = upwind.
+     *   "polar_pct": Float|null,  // % of polar target speed
+     *   "target_stw": Float|null, // Polar target boat speed, knots
+     *   "polar_loaded": Boolean   // true when a polar file is loaded on device
      * }
      */
-    val WIND_DATA_CHAR_UUID: UUID =
-        UUID.fromString("4d475743-0201-4e41-5649-474154494f4e")
+    val PERF_DATA_CHAR_UUID: UUID =
+        UUID.fromString("4d475743-0401-4e41-5649-474154494f4e")
 
     // ----------------------------------------------------------------
     // Standard CCCD descriptor used to enable notifications

@@ -63,7 +63,7 @@ enum class DataField(
         }
     ),
 
-    // ── Wind (populated once Wind BLE service is implemented) ─────────────────
+    // ── Wind ──────────────────────────────────────────────────────────────────
     AWS(
         label = "AWS",
         unit  = "kn",
@@ -90,10 +90,46 @@ enum class DataField(
         extract = { d -> d.wind?.twd?.let { "%.0f".format(it) } ?: "---" }
     ),
 
+    // ── Sail Performance ──────────────────────────────────────────────────────
+    VMG(
+        label = "VMG",
+        unit  = "kn",
+        extract = { d -> extractVmg(d) }
+    ),
+    POLAR_PCT(
+        label = "POLAR",
+        unit  = "%",
+        extract = { d -> extractPolarPct(d) }
+    ),
+    TARGET_STW(
+        label = "TGT",
+        unit  = "kn",
+        extract = { d -> extractTargetStw(d) }
+    ),
+
     // ── Sentinel — blank slot ─────────────────────────────────────────────────
     EMPTY(
         label = "",
         unit  = "",
         extract = { "---" }
     );
+}
+
+// ── Performance extract helpers (top-level to avoid return-in-lambda issues) ──
+
+private fun extractVmg(d: DisplayData): String {
+    val vmg = d.perf?.vmg ?: return "---"
+    return if (vmg >= 0f) "+%.1f".format(vmg) else "%.1f".format(vmg)
+}
+
+private fun extractPolarPct(d: DisplayData): String {
+    val perf = d.perf ?: return "---"
+    if (!perf.polarLoaded) return "NO POL"
+    return perf.polarPct?.let { "%.0f".format(it) } ?: "---"
+}
+
+private fun extractTargetStw(d: DisplayData): String {
+    val perf = d.perf ?: return "---"
+    if (!perf.polarLoaded) return "NO POL"
+    return perf.targetStw?.let { "%.1f".format(it) } ?: "---"
 }

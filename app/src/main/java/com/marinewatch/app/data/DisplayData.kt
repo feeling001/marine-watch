@@ -7,10 +7,13 @@ import com.google.gson.annotations.SerializedName
  *
  * [wind] is nullable because the Wind BLE service is not yet subscribed to.
  * It will be populated in a future iteration when WindData is added to BleManager.
+ *
+ * [perf] is nullable until the first PerformanceData notification is received.
  */
 data class DisplayData(
-    val nav:  NavData   = NavData.EMPTY,
-    val wind: WindData? = null
+    val nav:  NavData          = NavData.EMPTY,
+    val wind: WindData?        = null,
+    val perf: PerformanceData? = null
 )
 
 /**

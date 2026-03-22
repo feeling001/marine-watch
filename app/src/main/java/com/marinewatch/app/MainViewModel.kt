@@ -8,8 +8,8 @@ import com.marinewatch.app.ble.BleConnectionState
 import com.marinewatch.app.ble.BleConstants
 import com.marinewatch.app.ble.BleManager
 import com.marinewatch.app.data.NavData
-import com.marinewatch.app.data.WindData
 import com.marinewatch.app.data.PageConfig
+import com.marinewatch.app.data.PerformanceData
 import com.marinewatch.app.data.loadPageConfigs
 import com.marinewatch.app.data.savePageConfigs
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,20 +26,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val bleManager = BleManager(application)
 
-    val connectionState: StateFlow<BleConnectionState> = bleManager.connectionState
-    val navData: StateFlow<NavData>                    = bleManager.navData
-    val windData: StateFlow<WindData>                  = bleManager.windData
-    val lastDataTimestamp: StateFlow<Long>             = bleManager.lastDataTimestamp
+    val connectionState:    StateFlow<BleConnectionState> = bleManager.connectionState
+    val navData:            StateFlow<NavData>             = bleManager.navData
+    val perfData:           StateFlow<PerformanceData>     = bleManager.perfData
+    val lastDataTimestamp:  StateFlow<Long>                = bleManager.lastDataTimestamp
 
     // ── Page configuration ────────────────────────────────────────────────────
 
     private val _pageConfigs = MutableStateFlow(prefs.loadPageConfigs())
     val pageConfigs: StateFlow<List<PageConfig>> = _pageConfigs.asStateFlow()
 
-    /**
-     * Persists a new slot assignment for the given page and slot index.
-     * Emits an updated [pageConfigs] snapshot so the UI recomposes immediately.
-     */
     fun updateSlot(pageIndex: Int, slotIndex: Int, field: com.marinewatch.app.data.DataField) {
         val current = _pageConfigs.value.toMutableList()
         val page    = current[pageIndex]
