@@ -11,6 +11,7 @@ import com.marinewatch.app.data.AutopilotData
 import com.marinewatch.app.data.NavData
 import com.marinewatch.app.data.PageConfig
 import com.marinewatch.app.data.PerformanceData
+import com.marinewatch.app.data.WindData
 import com.marinewatch.app.data.loadPageConfigs
 import com.marinewatch.app.data.savePageConfigs
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,27 +28,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val bleManager = BleManager(application)
 
-    val connectionState:    StateFlow<BleConnectionState> = bleManager.connectionState
-    val navData:            StateFlow<NavData>             = bleManager.navData
-    val perfData:           StateFlow<PerformanceData>     = bleManager.perfData
-    val autopilotData:      StateFlow<AutopilotData>       = bleManager.autopilotData
-    val lastDataTimestamp:  StateFlow<Long>                = bleManager.lastDataTimestamp
-
-    // ── Page configuration ────────────────────────────────────────────────────
+    val connectionState:   StateFlow<BleConnectionState> = bleManager.connectionState
+    val navData:           StateFlow<NavData>             = bleManager.navData
+    val windData:          StateFlow<WindData>            = bleManager.windData   // ← ajout
+    val perfData:          StateFlow<PerformanceData>     = bleManager.perfData
+    val autopilotData:     StateFlow<AutopilotData>       = bleManager.autopilotData
+    val lastDataTimestamp: StateFlow<Long>                = bleManager.lastDataTimestamp
 
     private val _pageConfigs = MutableStateFlow(prefs.loadPageConfigs())
     val pageConfigs: StateFlow<List<PageConfig>> = _pageConfigs.asStateFlow()
 
     fun updateSlot(pageIndex: Int, slotIndex: Int, field: com.marinewatch.app.data.DataField) {
-        val current = _pageConfigs.value.toMutableList()
-        val page    = current[pageIndex]
+        val current  = _pageConfigs.value.toMutableList()
+        val page     = current[pageIndex]
         val newSlots = page.slots.toMutableList().also { it[slotIndex] = field }
         current[pageIndex] = PageConfig(newSlots)
-        _pageConfigs.value = current
+        _pageConfigs.value  = current
         prefs.savePageConfigs(current)
     }
-
-    // ── BLE helpers ───────────────────────────────────────────────────────────
 
     fun isDataStale(): Boolean {
         val ts = lastDataTimestamp.value
@@ -60,8 +58,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getPinCode(): Int    = prefs.getInt(PREF_PIN, BleConstants.PASSKEY)
     fun setPinCode(pin: Int) = prefs.edit().putInt(PREF_PIN, pin).apply()
-
-    // ── Autopilot commands ────────────────────────────────────────────────────
 
     fun sendAutopilotCommand(command: String) = bleManager.sendAutopilotCommand(command)
 

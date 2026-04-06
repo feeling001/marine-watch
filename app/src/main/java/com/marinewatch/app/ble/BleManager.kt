@@ -15,6 +15,7 @@ import com.google.gson.JsonSyntaxException
 import com.marinewatch.app.data.AutopilotData
 import com.marinewatch.app.data.NavData
 import com.marinewatch.app.data.PerformanceData
+import com.marinewatch.app.data.WindData
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -24,8 +25,8 @@ private const val TAG = "MarineWatch.BLE"
 /**
  * Manages the full BLE lifecycle for the Marine Gateway connection:
  *  - Scans for the device by name ([BleConstants.DEVICE_NAME])
- *  - Connects and discovers the Navigation, Sail Performance and Autopilot GATT services
- *  - Enables NOTIFY on NavData, PerformanceData and AutopilotData characteristics
+ *  - Connects and discovers the Navigation, Wind, Sail Performance and Autopilot GATT services
+ *  - Enables NOTIFY on NavData, WindData, PerformanceData and AutopilotData characteristics
  *  - Parses incoming JSON and exposes state flows
  *  - Writes autopilot commands via the AutopilotCmd characteristic
  *  - Auto-reconnects on link loss using exponential backoff
@@ -68,6 +69,9 @@ class BleManager(private val context: Context) {
 
     private val _navData = MutableStateFlow(NavData.EMPTY)
     val navData: StateFlow<NavData> = _navData.asStateFlow()
+
+    private val _windData = MutableStateFlow(WindData.EMPTY)
+    val windData: StateFlow<WindData> = _windData.asStateFlow()
 
     private val _perfData = MutableStateFlow(PerformanceData.EMPTY)
     val perfData: StateFlow<PerformanceData> = _perfData.asStateFlow()
@@ -334,6 +338,22 @@ class BleManager(private val context: Context) {
                 cccdQueue.addLast(navChar to it)
             } ?: Log.w(TAG, "NavData CCCD descriptor not found")
 
+            // ── Wind service (optional — graceful if absent) ────────────────
+            val windService = gatt.getService(BleConstants.WIND_SERVICE_UUID)
+            if (windService != null) {
+                val windChar = windService.getCharacteristic(BleConstants.WIND_DATA_CHAR_UUID)
+                if (windChar != null) {
+                    gatt.setCharacteristicNotification(windChar, true)
+                    windChar.getDescriptor(BleConstants.CCCD_UUID)?.let {
+                        cccdQueue.addLast(windChar to it)
+                    } ?: Log.w(TAG, "WindData CCCD descriptor not found")
+                } else {
+                    Log.w(TAG, "WindData characteristic not found — wind data unavailable")
+                }
+            } else {
+                Log.w(TAG, "Wind service not found — wind data unavailable")
+            }
+
             // ── Sail Performance service (optional — graceful if absent) ────
             val perfService = gatt.getService(BleConstants.PERF_SERVICE_UUID)
             if (perfService != null) {
@@ -353,7 +373,6 @@ class BleManager(private val context: Context) {
             // ── Autopilot service (optional — graceful if absent) ───────────
             val apService = gatt.getService(BleConstants.AUTOPILOT_SERVICE_UUID)
             if (apService != null) {
-                // Subscribe to AutopilotData notifications
                 val apDataChar = apService.getCharacteristic(BleConstants.AUTOPILOT_DATA_CHAR_UUID)
                 if (apDataChar != null) {
                     gatt.setCharacteristicNotification(apDataChar, true)
@@ -364,7 +383,6 @@ class BleManager(private val context: Context) {
                     Log.w(TAG, "AutopilotData characteristic not found")
                 }
 
-                // Keep a reference to the command characteristic for later writes
                 val cmdChar = apService.getCharacteristic(BleConstants.AUTOPILOT_CMD_CHAR_UUID)
                 if (cmdChar != null) {
                     autopilotCmdChar = cmdChar
@@ -391,7 +409,6 @@ class BleManager(private val context: Context) {
                 } else {
                     Log.e(TAG, "Failed to write CCCD for ${descriptor.characteristic.uuid}: status=$status")
                 }
-                // Write the next CCCD in the queue, or mark CONNECTED if done
                 writeNextCccd(gatt)
             }
         }
@@ -420,11 +437,6 @@ class BleManager(private val context: Context) {
     // Sequential CCCD write queue
     // ----------------------------------------------------------------
 
-    /**
-     * Writes the CCCD for the next characteristic in [cccdQueue].
-     * If the queue is empty, all notifications are enabled and we
-     * transition to [BleConnectionState.CONNECTED].
-     */
     private fun writeNextCccd(gatt: BluetoothGatt) {
         if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return
         val next = cccdQueue.removeFirstOrNull()
@@ -444,8 +456,9 @@ class BleManager(private val context: Context) {
 
     private fun dispatchCharacteristicValue(uuid: java.util.UUID, value: ByteArray) {
         when (uuid) {
-            BleConstants.NAV_DATA_CHAR_UUID      -> parseNavData(value)
-            BleConstants.PERF_DATA_CHAR_UUID     -> parsePerfData(value)
+            BleConstants.NAV_DATA_CHAR_UUID       -> parseNavData(value)
+            BleConstants.WIND_DATA_CHAR_UUID      -> parseWindData(value)
+            BleConstants.PERF_DATA_CHAR_UUID      -> parsePerfData(value)
             BleConstants.AUTOPILOT_DATA_CHAR_UUID -> parseAutopilotData(value)
         }
     }
@@ -522,6 +535,19 @@ class BleManager(private val context: Context) {
             Log.d(TAG, "NavData parsed OK: stw=${data.stw} depth=${data.depth} cog=${data.cog} sog=${data.sog}")
         } catch (e: JsonSyntaxException) {
             Log.e(TAG, "NavData JSON parse error (${bytes.size} bytes): ${e.message}")
+            Log.e(TAG, "Raw bytes (hex): ${bytes.joinToString(" ") { "%02X".format(it) }}")
+        }
+    }
+
+    private fun parseWindData(bytes: ByteArray) {
+        val json = bytes.toString(Charsets.UTF_8)
+        Log.d(TAG, "WindData received: ${bytes.size} bytes → $json")
+        try {
+            val data = gson.fromJson(json, WindData::class.java)
+            _windData.value = data
+            Log.d(TAG, "WindData parsed OK: aws=${data.aws} awa=${data.awa} tws=${data.tws} twa=${data.twa} twd=${data.twd}")
+        } catch (e: JsonSyntaxException) {
+            Log.e(TAG, "WindData JSON parse error (${bytes.size} bytes): ${e.message}")
             Log.e(TAG, "Raw bytes (hex): ${bytes.joinToString(" ") { "%02X".format(it) }}")
         }
     }
