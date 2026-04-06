@@ -12,6 +12,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.google.gson.JsonSyntaxException
+import com.marinewatch.app.data.AutopilotData
 import com.marinewatch.app.data.NavData
 import com.marinewatch.app.data.PerformanceData
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,9 +24,10 @@ private const val TAG = "MarineWatch.BLE"
 /**
  * Manages the full BLE lifecycle for the Marine Gateway connection:
  *  - Scans for the device by name ([BleConstants.DEVICE_NAME])
- *  - Connects and discovers the Navigation + Sail Performance GATT services
- *  - Enables NOTIFY on NavData and PerformanceData characteristics
- *  - Parses incoming JSON and exposes [navData] and [perfData] as StateFlows
+ *  - Connects and discovers the Navigation, Sail Performance and Autopilot GATT services
+ *  - Enables NOTIFY on NavData, PerformanceData and AutopilotData characteristics
+ *  - Parses incoming JSON and exposes state flows
+ *  - Writes autopilot commands via the AutopilotCmd characteristic
  *  - Auto-reconnects on link loss using exponential backoff
  *  - Detects BLE pairing events and exposes them via [connectionState]
  *
@@ -70,6 +72,9 @@ class BleManager(private val context: Context) {
     private val _perfData = MutableStateFlow(PerformanceData.EMPTY)
     val perfData: StateFlow<PerformanceData> = _perfData.asStateFlow()
 
+    private val _autopilotData = MutableStateFlow(AutopilotData.EMPTY)
+    val autopilotData: StateFlow<AutopilotData> = _autopilotData.asStateFlow()
+
     /** Timestamp (System.currentTimeMillis) of the last valid NavData packet. */
     private val _lastDataTimestamp = MutableStateFlow(0L)
     val lastDataTimestamp: StateFlow<Long> = _lastDataTimestamp.asStateFlow()
@@ -84,6 +89,7 @@ class BleManager(private val context: Context) {
     private val bleScanner: BluetoothLeScanner? get() = bluetoothAdapter?.bluetoothLeScanner
 
     private var gatt: BluetoothGatt? = null
+    private var autopilotCmdChar: BluetoothGattCharacteristic? = null
     private var isStarted = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -146,6 +152,53 @@ class BleManager(private val context: Context) {
         reconnectAttempt = 0
         isStarted = true
         startScan()
+    }
+
+    /**
+     * Sends an autopilot command to the Marine Gateway.
+     *
+     * Valid commands: "enable", "disable", "adjust+10", "adjust-10", "adjust+1", "adjust-1"
+     *
+     * The write is fire-and-forget (WRITE_TYPE_NO_RESPONSE), matching the ESP32
+     * characteristic property. The function is a no-op if the GATT connection
+     * is not ready or the characteristic was not discovered.
+     */
+    fun sendAutopilotCommand(command: String) {
+        val char = autopilotCmdChar
+        val currentGatt = gatt
+
+        if (char == null || currentGatt == null) {
+            Log.w(TAG, "sendAutopilotCommand('$command') ignored — not connected or char not found")
+            return
+        }
+        if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            Log.w(TAG, "sendAutopilotCommand('$command') ignored — missing BLUETOOTH_CONNECT permission")
+            return
+        }
+
+        val payload = """{"command":"$command"}""".toByteArray(Charsets.UTF_8)
+        Log.i(TAG, "Sending autopilot command: $command")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val result = currentGatt.writeCharacteristic(
+                char,
+                payload,
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            )
+            if (result != BluetoothGatt.GATT_SUCCESS) {
+                Log.e(TAG, "writeCharacteristic (API33+) returned error: $result")
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            @Suppress("DEPRECATION")
+            char.value = payload
+            @Suppress("DEPRECATION")
+            val ok = currentGatt.writeCharacteristic(char)
+            if (!ok) {
+                Log.e(TAG, "writeCharacteristic (legacy) returned false")
+            }
+        }
     }
 
     // ----------------------------------------------------------------
@@ -257,6 +310,7 @@ class BleManager(private val context: Context) {
 
             // Build the sequential CCCD write queue
             cccdQueue.clear()
+            autopilotCmdChar = null
 
             // ── Navigation service ──────────────────────────────────────────
             val navService = gatt.getService(BleConstants.NAV_SERVICE_UUID)
@@ -294,6 +348,32 @@ class BleManager(private val context: Context) {
                 }
             } else {
                 Log.w(TAG, "Sail Performance service not found — performance data unavailable")
+            }
+
+            // ── Autopilot service (optional — graceful if absent) ───────────
+            val apService = gatt.getService(BleConstants.AUTOPILOT_SERVICE_UUID)
+            if (apService != null) {
+                // Subscribe to AutopilotData notifications
+                val apDataChar = apService.getCharacteristic(BleConstants.AUTOPILOT_DATA_CHAR_UUID)
+                if (apDataChar != null) {
+                    gatt.setCharacteristicNotification(apDataChar, true)
+                    apDataChar.getDescriptor(BleConstants.CCCD_UUID)?.let {
+                        cccdQueue.addLast(apDataChar to it)
+                    } ?: Log.w(TAG, "AutopilotData CCCD descriptor not found")
+                } else {
+                    Log.w(TAG, "AutopilotData characteristic not found")
+                }
+
+                // Keep a reference to the command characteristic for later writes
+                val cmdChar = apService.getCharacteristic(BleConstants.AUTOPILOT_CMD_CHAR_UUID)
+                if (cmdChar != null) {
+                    autopilotCmdChar = cmdChar
+                    Log.i(TAG, "AutopilotCmd characteristic ready")
+                } else {
+                    Log.w(TAG, "AutopilotCmd characteristic not found — commands unavailable")
+                }
+            } else {
+                Log.w(TAG, "Autopilot service not found — autopilot unavailable")
             }
 
             // Kick off the sequential CCCD write chain
@@ -349,7 +429,6 @@ class BleManager(private val context: Context) {
         if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return
         val next = cccdQueue.removeFirstOrNull()
         if (next == null) {
-            // All CCCDs written — fully connected
             Log.i(TAG, "All CCCD writes complete — CONNECTED")
             _connectionState.value = BleConnectionState.CONNECTED
             return
@@ -365,8 +444,9 @@ class BleManager(private val context: Context) {
 
     private fun dispatchCharacteristicValue(uuid: java.util.UUID, value: ByteArray) {
         when (uuid) {
-            BleConstants.NAV_DATA_CHAR_UUID  -> parseNavData(value)
-            BleConstants.PERF_DATA_CHAR_UUID -> parsePerfData(value)
+            BleConstants.NAV_DATA_CHAR_UUID      -> parseNavData(value)
+            BleConstants.PERF_DATA_CHAR_UUID     -> parsePerfData(value)
+            BleConstants.AUTOPILOT_DATA_CHAR_UUID -> parseAutopilotData(value)
         }
     }
 
@@ -459,6 +539,19 @@ class BleManager(private val context: Context) {
         }
     }
 
+    private fun parseAutopilotData(bytes: ByteArray) {
+        val json = bytes.toString(Charsets.UTF_8)
+        Log.d(TAG, "AutopilotData received: ${bytes.size} bytes → $json")
+        try {
+            val data = gson.fromJson(json, AutopilotData::class.java)
+            _autopilotData.value = data
+            Log.d(TAG, "AutopilotData parsed OK: mode=${data.mode} status=${data.status} heading_target=${data.headingTarget}")
+        } catch (e: JsonSyntaxException) {
+            Log.e(TAG, "AutopilotData JSON parse error (${bytes.size} bytes): ${e.message}")
+            Log.e(TAG, "Raw bytes (hex): ${bytes.joinToString(" ") { "%02X".format(it) }}")
+        }
+    }
+
     // ----------------------------------------------------------------
     // Reconnection with exponential backoff
     // ----------------------------------------------------------------
@@ -507,6 +600,7 @@ class BleManager(private val context: Context) {
 
     private fun cleanupGatt() {
         cccdQueue.clear()
+        autopilotCmdChar = null
         closeGatt()
         _connectionState.value = BleConnectionState.RECONNECTING
     }

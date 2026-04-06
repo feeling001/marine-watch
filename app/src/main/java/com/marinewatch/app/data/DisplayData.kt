@@ -9,11 +9,14 @@ import com.google.gson.annotations.SerializedName
  * It will be populated in a future iteration when WindData is added to BleManager.
  *
  * [perf] is nullable until the first PerformanceData notification is received.
+ *
+ * [autopilot] is nullable until the first AutopilotData notification is received.
  */
 data class DisplayData(
-    val nav:  NavData          = NavData.EMPTY,
-    val wind: WindData?        = null,
-    val perf: PerformanceData? = null
+    val nav:       NavData        = NavData.EMPTY,
+    val wind:      WindData?      = null,
+    val perf:      PerformanceData? = null,
+    val autopilot: AutopilotData? = null
 )
 
 /**

@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import com.marinewatch.app.ble.BleConnectionState
 import com.marinewatch.app.ble.BleConstants
 import com.marinewatch.app.ble.BleManager
+import com.marinewatch.app.data.AutopilotData
 import com.marinewatch.app.data.NavData
 import com.marinewatch.app.data.PageConfig
 import com.marinewatch.app.data.PerformanceData
@@ -29,6 +30,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val connectionState:    StateFlow<BleConnectionState> = bleManager.connectionState
     val navData:            StateFlow<NavData>             = bleManager.navData
     val perfData:           StateFlow<PerformanceData>     = bleManager.perfData
+    val autopilotData:      StateFlow<AutopilotData>       = bleManager.autopilotData
     val lastDataTimestamp:  StateFlow<Long>                = bleManager.lastDataTimestamp
 
     // ── Page configuration ────────────────────────────────────────────────────
@@ -58,6 +60,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getPinCode(): Int    = prefs.getInt(PREF_PIN, BleConstants.PASSKEY)
     fun setPinCode(pin: Int) = prefs.edit().putInt(PREF_PIN, pin).apply()
+
+    // ── Autopilot commands ────────────────────────────────────────────────────
+
+    fun sendAutopilotCommand(command: String) = bleManager.sendAutopilotCommand(command)
 
     override fun onCleared() {
         super.onCleared()

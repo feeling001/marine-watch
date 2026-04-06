@@ -30,18 +30,6 @@ object BleConstants {
      * NavData characteristic UUID.
      * Properties: READ + NOTIFY.
      * Payload: UTF-8 JSON, updated at 1 Hz.
-     *
-     * JSON shape:
-     * {
-     *   "lat": Float|null,
-     *   "lon": Float|null,
-     *   "sog": Float|null,   // Speed Over Ground, knots
-     *   "cog": Float|null,   // Course Over Ground, 0–360 °
-     *   "stw": Float|null,   // Speed Through Water, knots
-     *   "hdg_mag": Float|null,
-     *   "hdg_true": Float|null,
-     *   "depth": Float|null  // Depth below transducer, metres
-     * }
      */
     val NAV_DATA_CHAR_UUID: UUID =
         UUID.fromString("4d475743-0101-4e41-5649-474154494f4e")
@@ -58,17 +46,46 @@ object BleConstants {
      * PerformanceData characteristic UUID.
      * Properties: READ + NOTIFY.
      * Payload: UTF-8 JSON, updated at 1 Hz.
-     *
-     * JSON shape:
-     * {
-     *   "vmg": Float|null,        // Velocity Made Good, knots. Positive = upwind.
-     *   "polar_pct": Float|null,  // % of polar target speed
-     *   "target_stw": Float|null, // Polar target boat speed, knots
-     *   "polar_loaded": Boolean   // true when a polar file is loaded on device
-     * }
      */
     val PERF_DATA_CHAR_UUID: UUID =
         UUID.fromString("4d475743-0401-4e41-5649-474154494f4e")
+
+    // ----------------------------------------------------------------
+    // Autopilot Service
+    // ----------------------------------------------------------------
+
+    /** Autopilot GATT service UUID */
+    val AUTOPILOT_SERVICE_UUID: UUID =
+        UUID.fromString("4d475743-0003-4e41-5649-474154494f4e")
+
+    /**
+     * AutopilotData characteristic UUID.
+     * Properties: READ + NOTIFY.
+     * Payload: UTF-8 JSON, updated at 1 Hz.
+     *
+     * JSON shape:
+     * {
+     *   "mode": String|null,            // "standby", "auto", "wind", "track", "manual"
+     *   "status": String|null,          // "engaged", "standby", "alarm"
+     *   "heading_target": Float|null,   // target heading in degrees (auto mode)
+     *   "wind_target": Float|null,      // target wind angle in degrees (wind mode)
+     *   "rudder": Float|null,           // rudder angle, positive = starboard
+     *   "locked_heading": Float|null    // locked heading in degrees
+     * }
+     */
+    val AUTOPILOT_DATA_CHAR_UUID: UUID =
+        UUID.fromString("4d475743-0301-4e41-5649-474154494f4e")
+
+    /**
+     * AutopilotCmd characteristic UUID.
+     * Properties: WRITE (no response).
+     * Payload: UTF-8 JSON command.
+     *
+     * JSON shape: { "command": "<cmd>" }
+     * Commands: "enable", "disable", "adjust+10", "adjust-10", "adjust+1", "adjust-1"
+     */
+    val AUTOPILOT_CMD_CHAR_UUID: UUID =
+        UUID.fromString("4d475743-0302-4e41-5649-474154494f4e")
 
     // ----------------------------------------------------------------
     // Standard CCCD descriptor used to enable notifications

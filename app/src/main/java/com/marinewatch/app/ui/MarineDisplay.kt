@@ -40,11 +40,15 @@ private val ColorAmbientLabel = Color(0xFF455A64)
 private val ColorSuccess      = Color(0xFF69F0AE)
 private val ColorDanger       = Color(0xFFFF5252)
 
-/** Total number of swipable pages: DATA_PAGE_COUNT data pages + 1 config page. */
-private val TOTAL_PAGES = DATA_PAGE_COUNT + 1
-
-/** Index of the config page (last page). */
-private val CONFIG_PAGE_INDEX = DATA_PAGE_COUNT
+/**
+ * Page layout:
+ *   pages 0 … DATA_PAGE_COUNT-1  → configurable 2×2 data grids
+ *   page  DATA_PAGE_COUNT        → autopilot control
+ *   page  DATA_PAGE_COUNT+1      → configuration
+ */
+private val AUTOPILOT_PAGE_INDEX = DATA_PAGE_COUNT
+private val CONFIG_PAGE_INDEX    = DATA_PAGE_COUNT + 1
+private val TOTAL_PAGES          = DATA_PAGE_COUNT + 2
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data freshness
@@ -69,11 +73,10 @@ private fun dataFreshness(lastTs: Long): DataFreshness {
 /**
  * Root display composable.
  *
- * Layout:
- *  - When BLE state is not CONNECTED → full-screen status overlay (no pager).
- *  - When CONNECTED → [HorizontalPager] with [TOTAL_PAGES] pages:
- *      pages 0–[DATA_PAGE_COUNT-1] : configurable 2×2 data grids
- *      page  [CONFIG_PAGE_INDEX]   : page-layout configuration UI + Settings link
+ * Layout (swipe left/right):
+ *   pages 0–[DATA_PAGE_COUNT-1] : configurable 2×2 data grids
+ *   page  [AUTOPILOT_PAGE_INDEX] : autopilot control
+ *   page  [CONFIG_PAGE_INDEX]    : layout configuration + BLE settings
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -147,8 +150,8 @@ private fun MainPager(
             state    = pagerState,
             modifier = Modifier.fillMaxSize()
         ) { pageIndex ->
-            when {
-                pageIndex < DATA_PAGE_COUNT -> {
+            when (pageIndex) {
+                in 0 until DATA_PAGE_COUNT -> {
                     DataPage(
                         bleState    = state,
                         config      = pageConfigs[pageIndex],
@@ -156,6 +159,12 @@ private fun MainPager(
                         freshness   = freshness,
                         isAmbient   = isAmbient,
                         pageNumber  = pageIndex + 1
+                    )
+                }
+                AUTOPILOT_PAGE_INDEX -> {
+                    AutopilotPage(
+                        viewModel = viewModel,
+                        isAmbient = isAmbient
                     )
                 }
                 else -> {
@@ -168,6 +177,7 @@ private fun MainPager(
             }
         }
 
+        // Page indicator dots
         if (!isAmbient) {
             Row(
                 modifier              = Modifier
@@ -178,13 +188,17 @@ private fun MainPager(
             ) {
                 repeat(TOTAL_PAGES) { index ->
                     val isSelected = pagerState.currentPage == index
+                    // Use a distinct shape for the autopilot page dot
+                    val dotSize = if (isSelected) 6.dp else 5.dp
+                    val dotColor = when {
+                        isSelected && index == AUTOPILOT_PAGE_INDEX -> ColorSuccess
+                        isSelected                                   -> ColorAccent
+                        else                                         -> ColorLabel.copy(alpha = 0.4f)
+                    }
                     Box(
                         modifier = Modifier
-                            .size(if (isSelected) 6.dp else 5.dp)
-                            .background(
-                                color  = if (isSelected) ColorAccent else ColorLabel.copy(alpha = 0.4f),
-                                shape  = RoundedCornerShape(50)
-                            )
+                            .size(dotSize)
+                            .background(color = dotColor, shape = RoundedCornerShape(50))
                     )
                 }
             }
