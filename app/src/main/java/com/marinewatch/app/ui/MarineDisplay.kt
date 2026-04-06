@@ -99,12 +99,13 @@ fun MarineDisplay(
     val perf        by viewModel.perfData.collectAsState()
     val lastTs      by viewModel.lastDataTimestamp.collectAsState()
     val pageConfigs by viewModel.pageConfigs.collectAsState()
-
+ 
     val freshness   = remember(lastTs) { dataFreshness(lastTs) }
 
-    // Combine nav + perf into a single DisplayData snapshot for the grid
-    val displayData = remember(nav, perf) { DisplayData(nav = nav, perf = perf) }
+    val wind        by viewModel.windData.collectAsState()
+    val displayData = remember(nav, wind, perf) { DisplayData(nav = nav, wind = wind, perf = perf) }
 
+    
     Box(
         modifier         = Modifier
             .fillMaxSize()
