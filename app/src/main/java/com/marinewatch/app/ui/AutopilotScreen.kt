@@ -244,9 +244,9 @@ private fun EnableDisableButton(
 ) {
     val isEngaged = autopilot.isEngaged
 
-    val label = if (isEngaged) "DISABLE" else "ENABLE"
+    val label = if (isEngaged) "DISABLE" else "AUTO"
     val color = if (isEngaged) ColorDanger else ColorSuccess
-    val cmd   = if (isEngaged) "disable"  else "enable"
+    val cmd   = if (isEngaged) "disable"  else "auto"
 
     Chip(
         modifier = Modifier
