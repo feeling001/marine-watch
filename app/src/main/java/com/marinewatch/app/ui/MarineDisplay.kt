@@ -19,10 +19,16 @@ import androidx.wear.compose.material.*
 import com.marinewatch.app.MainViewModel
 import com.marinewatch.app.ble.BleConnectionState
 import com.marinewatch.app.ble.BleConstants
+import com.marinewatch.app.data.AdminData
 import com.marinewatch.app.data.DATA_PAGE_COUNT
 import com.marinewatch.app.data.DataField
 import com.marinewatch.app.data.DisplayData
 import com.marinewatch.app.data.PageConfig
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Navigation States
+// ─────────────────────────────────────────────────────────────────────────────
+private enum class AppScreen { PAGER, BLE_SETTINGS, WIFI_SETTINGS }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Colour palette
@@ -42,13 +48,28 @@ private val ColorDanger       = Color(0xFFFF5252)
 
 /**
  * Page layout:
- *   pages 0 … DATA_PAGE_COUNT-1  → configurable 2×2 data grids
- *   page  DATA_PAGE_COUNT        → autopilot control
- *   page  DATA_PAGE_COUNT+1      → configuration
+ * pages 0 … DATA_PAGE_COUNT-1  → configurable 2×2 data grids
+ * page  DATA_PAGE_COUNT        → autopilot control
+ * page  DATA_PAGE_COUNT+1      → configuration
  */
 private val AUTOPILOT_PAGE_INDEX = DATA_PAGE_COUNT
 private val CONFIG_PAGE_INDEX    = DATA_PAGE_COUNT + 1
 private val TOTAL_PAGES          = DATA_PAGE_COUNT + 2
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RSSI signal quality
+// ─────────────────────────────────────────────────────────────────────────────
+
+internal enum class SignalQuality { EXCELLENT, GOOD, FAIR, POOR, VERY_POOR }
+
+private fun rssiToQuality(rssi: Int): SignalQuality = when {
+    rssi == 0                          -> SignalQuality.VERY_POOR
+    rssi > BleConstants.RSSI_EXCELLENT -> SignalQuality.EXCELLENT
+    rssi > BleConstants.RSSI_GOOD      -> SignalQuality.GOOD
+    rssi > BleConstants.RSSI_FAIR      -> SignalQuality.FAIR
+    rssi > BleConstants.RSSI_POOR      -> SignalQuality.POOR
+    else                               -> SignalQuality.VERY_POOR
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data freshness
@@ -70,42 +91,49 @@ private fun dataFreshness(lastTs: Long): DataFreshness {
 // Root composable
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Root display composable.
- *
- * Layout (swipe left/right):
- *   pages 0–[DATA_PAGE_COUNT-1] : configurable 2×2 data grids
- *   page  [AUTOPILOT_PAGE_INDEX] : autopilot control
- *   page  [CONFIG_PAGE_INDEX]    : layout configuration + BLE settings
- */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MarineDisplay(
     viewModel: MainViewModel,
     isAmbient: Boolean = false
 ) {
-    var showSettings by remember { mutableStateOf(false) }
+    // Gestion de la navigation centralisée par Enum au lieu de simples booleans
+    var currentScreen by remember { mutableStateOf(AppScreen.PAGER) }
 
-    if (showSettings) {
-        SettingsScreen(
-            viewModel = viewModel,
-            onDismiss = { showSettings = false }
-        )
-        return
+    when (currentScreen) {
+        AppScreen.BLE_SETTINGS -> {
+            SettingsScreen(
+                viewModel = viewModel,
+                onDismiss = { currentScreen = AppScreen.PAGER }
+            )
+            return
+        }
+        AppScreen.WIFI_SETTINGS -> {
+            WifiSettingsScreen(
+                viewModel = viewModel,
+                isAmbient = isAmbient,
+                onBack    = { currentScreen = AppScreen.PAGER } // Retourne au Pager global
+            )
+            return
+        }
+        AppScreen.PAGER -> { /* Continue le rendu normal du Pager */ }
     }
 
     val state       by viewModel.connectionState.collectAsState()
     val nav         by viewModel.navData.collectAsState()
     val perf        by viewModel.perfData.collectAsState()
+    val wind        by viewModel.windData.collectAsState()
     val lastTs      by viewModel.lastDataTimestamp.collectAsState()
     val pageConfigs by viewModel.pageConfigs.collectAsState()
- 
+    val admin       by viewModel.adminData.collectAsState()
+    val rssi        by viewModel.rssi.collectAsState()
+
     val freshness   = remember(lastTs) { dataFreshness(lastTs) }
+    val quality     = remember(rssi) { rssiToQuality(rssi) }
 
-    val wind        by viewModel.windData.collectAsState()
-    val displayData = remember(nav, wind, perf) { DisplayData(nav = nav, wind = wind, perf = perf) }
+    // Combine nav + perf + wind into a single DisplayData snapshot for the grid
+    val displayData = remember(nav, perf, wind) { DisplayData(nav = nav, perf = perf, wind = wind) }
 
-    
     Box(
         modifier         = Modifier
             .fillMaxSize()
@@ -119,8 +147,20 @@ fun MarineDisplay(
             freshness      = freshness,
             isAmbient      = isAmbient,
             viewModel      = viewModel,
-            onOpenSettings = { showSettings = true }
+            admin          = admin,
+            onOpenSettings = { currentScreen = AppScreen.BLE_SETTINGS },
+            onOpenWifi     = { currentScreen = AppScreen.WIFI_SETTINGS }
         )
+
+        // RSSI indicator — top centre, visible on all pages in interactive mode when connected
+        if (!isAmbient && state == BleConnectionState.CONNECTED) {
+            RssiIndicator(
+                quality  = quality,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 4.dp)
+            )
+        }
 
         if (isAmbient && state == BleConnectionState.RECONNECTING) {
             AmbientOfflineIndicator()
@@ -141,7 +181,9 @@ private fun MainPager(
     freshness:      DataFreshness,
     isAmbient:      Boolean,
     viewModel:      MainViewModel,
-    onOpenSettings: () -> Unit
+    admin:          AdminData?,
+    onOpenSettings: () -> Unit,
+    onOpenWifi:     () -> Unit
 ) {
     val pagerState = rememberPagerState { TOTAL_PAGES }
 
@@ -172,7 +214,10 @@ private fun MainPager(
                     ConfigPage(
                         pageConfigs    = pageConfigs,
                         viewModel      = viewModel,
-                        onOpenSettings = onOpenSettings
+                        admin          = admin,
+                        isAmbient      = isAmbient,
+                        onOpenSettings = onOpenSettings,
+                        onOpenWifi     = onOpenWifi
                     )
                 }
             }
@@ -189,7 +234,6 @@ private fun MainPager(
             ) {
                 repeat(TOTAL_PAGES) { index ->
                     val isSelected = pagerState.currentPage == index
-                    // Use a distinct shape for the autopilot page dot
                     val dotSize = if (isSelected) 6.dp else 5.dp
                     val dotColor = when {
                         isSelected && index == AUTOPILOT_PAGE_INDEX -> ColorSuccess
@@ -248,6 +292,99 @@ private fun DataPage(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// RSSI Component
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+internal fun RssiIndicator(
+    quality: SignalQuality,
+    modifier: Modifier = Modifier
+) {
+    val filledBars = when (quality) {
+        SignalQuality.EXCELLENT -> 5
+        SignalQuality.GOOD      -> 4
+        SignalQuality.FAIR      -> 3
+        SignalQuality.POOR      -> 2
+        SignalQuality.VERY_POOR -> 1
+    }
+    val barColor = when (quality) {
+        SignalQuality.EXCELLENT,
+        SignalQuality.GOOD      -> ColorSuccess
+        SignalQuality.FAIR,
+        SignalQuality.POOR      -> ColorWarning
+        SignalQuality.VERY_POOR -> ColorDanger
+    }
+    val emptyColor = Color(0xFF263238)
+
+    Row(
+        modifier              = modifier,
+        verticalAlignment     = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(1.5.dp)
+    ) {
+        for (i in 1..5) {
+            val barHeight = (4 + i * 2).dp
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(barHeight)
+                    .background(
+                        color = if (i <= filledBars) barColor else emptyColor,
+                        shape = RoundedCornerShape(topStart = 1.dp, topEnd = 1.dp)
+                    )
+            )
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin info row (uptime + IP)
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun AdminInfoRow(admin: AdminData?, isAmbient: Boolean) {
+    val labelColor = if (isAmbient) ColorAmbientLabel else ColorLabel
+    val valueColor = if (isAmbient) ColorAmbientValue else ColorValue
+    val uptime = admin?.uptimeS ?: 0L
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth(0.88f)
+            .background(
+                color = Color(0xFF0D1B2A),
+                shape = RoundedCornerShape(8.dp)
+            )
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.Start
+    ) {
+        Row(
+            modifier              = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(text = "Uptime", color = labelColor, fontSize = 9.sp)
+            Text(
+                text = if (uptime > 0) admin?.uptimeFormatted() ?: "—" else "—",
+                color = valueColor,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+        Spacer(modifier = Modifier.height(2.dp))
+        Row(
+            modifier              = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(text = "IP", color = labelColor, fontSize = 9.sp)
+            Text(
+                text = admin?.ip ?: "—",
+                color = valueColor,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 2×2 data grid
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -274,6 +411,7 @@ internal fun NavGrid(
         horizontalAlignment     = Alignment.CenterHorizontally
     ) {
         if (!isAmbient) {
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text          = "MARINE  $pageNumber/${DATA_PAGE_COUNT}",
                 color         = ColorAccent,
@@ -319,6 +457,10 @@ internal fun NavGrid(
                 valueColor = valueColor,
                 labelColor = labelColor
             )
+        }
+        
+        if (!isAmbient) {
+            Spacer(modifier = Modifier.height(8.dp))
         }
     }
 }
@@ -366,7 +508,10 @@ internal fun DataTile(
 private fun ConfigPage(
     pageConfigs:    List<PageConfig>,
     viewModel:      MainViewModel,
-    onOpenSettings: () -> Unit
+    admin:          AdminData?,
+    isAmbient:      Boolean,
+    onOpenSettings: () -> Unit,
+    onOpenWifi:     () -> Unit // Callback branché pour l'ouverture
 ) {
     ScalingLazyColumn(
         modifier            = Modifier.fillMaxSize(),
@@ -375,6 +520,7 @@ private fun ConfigPage(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         item {
+            Spacer(Modifier.height(4.dp))
             Text(
                 text          = "⚙  CONFIGURE",
                 color         = ColorAccent,
@@ -398,6 +544,7 @@ private fun ConfigPage(
 
         item { Spacer(Modifier.height(4.dp)) }
 
+        // BLE Settings Button
         item {
             Chip(
                 modifier  = Modifier.fillMaxWidth().height(36.dp),
@@ -416,6 +563,33 @@ private fun ConfigPage(
                 }
             )
         }
+
+        // WiFi Settings Button
+        item {
+            Chip(
+                modifier  = Modifier.fillMaxWidth().height(36.dp),
+                onClick   = onOpenWifi, // Exécute maintenant le changement d'écran vers le WiFi
+                colors    = ChipDefaults.chipColors(
+                    backgroundColor = ColorAccent.copy(alpha = 0.13f)
+                ),
+                label     = {
+                    Text(
+                        text      = "WiFi Settings",
+                        color     = ColorAccent,
+                        fontSize  = 12.sp,
+                        modifier  = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            )
+        }
+
+        // Admin Info Row (Uptime & IP)
+        item {
+            AdminInfoRow(admin = admin, isAmbient = isAmbient)
+        }
+        
+        item { Spacer(Modifier.height(10.dp)) }
     }
 }
 
@@ -611,7 +785,7 @@ fun DisconnectedScreen() {
         Spacer(Modifier.height(6.dp))
         Text(
             text     = "Disconnected",
-            color    = ColorWarning,
+            color = ColorWarning,
             fontSize = 13.sp
         )
     }
