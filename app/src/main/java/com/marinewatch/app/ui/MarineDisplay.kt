@@ -515,6 +515,13 @@ private fun ConfigPage(
     onOpenSettings: () -> Unit,
     onOpenWifi:     () -> Unit // Callback branché pour l'ouverture
 ) {
+
+    val isConnected =
+        viewModel.connectionState.collectAsState().value == BleConnectionState.CONNECTED
+
+    // Reboot feedback state
+    var rebootFeedback by remember { mutableStateOf<String?>(null) }
+
     ScalingLazyColumn(
         modifier            = Modifier.fillMaxSize(),
         contentPadding      = PaddingValues(horizontal = 8.dp, vertical = 28.dp),
@@ -585,6 +592,51 @@ private fun ConfigPage(
                 }
             )
         }
+            // ---- Reboot button ----
+            item {
+                Chip(
+                    onClick = {
+                        if (isConnected) {
+                            val sent = viewModel.sendRestart()
+                            rebootFeedback = if (sent)
+                                "Reboot command sent.\nReconnecting in ~5 s…"
+                            else
+                                "Send failed.\nCheck BLE connection."
+                        } else {
+                            rebootFeedback = "Not connected to ESP."
+                        }
+                    },
+                    colors = ChipDefaults.primaryChipColors(
+                        backgroundColor = ColorDanger
+                    ),
+                    modifier = Modifier.fillMaxWidth(0.88f),
+                    label = {
+                        Text(
+                            text = "Reboot ESPNav",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    },
+                    icon = {
+                        Text("🔴", fontSize = 12.sp)
+                    }
+                )
+            }
+
+            // ---- Reboot feedback ----
+            rebootFeedback?.let { msg ->
+                item {
+                    val isError = msg.startsWith("Send failed") || msg.startsWith("Not connected")
+                    Text(
+                        text = msg,
+                        color = if (isError) ColorWarning else ColorSuccess,
+                        fontSize = 10.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
+                }
+            }
 
         // Admin Info Row (Uptime & IP)
         item {
