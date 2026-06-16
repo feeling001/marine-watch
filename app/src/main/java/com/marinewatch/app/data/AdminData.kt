@@ -16,12 +16,12 @@ import com.google.gson.annotations.SerializedName
  *  - [freeHeap]    : free heap memory in bytes (diagnostic)
  */
 data class AdminData(
-    @SerializedName("uptime_s")     val uptimeS:     Long?   = null,
-    @SerializedName("datetime_utc") val datetimeUtc: Long?   = null,
-    @SerializedName("wifi_mode")    val wifiMode:    String? = null,
-    @SerializedName("wifi_ssid")    val wifiSsid:    String? = null,
-    @SerializedName("ip")           val ip:          String? = null,
-    @SerializedName("free_heap")    val freeHeap:    Long?   = null
+    @SerializedName("uptime_s")     val uptimeS:        Long?   = null,
+    @SerializedName("datetime_utc") val datetimeUtc:    Long?   = null,
+    @SerializedName("wifi_mode")    val wifiMode:       String? = null,
+    @SerializedName("wifi_ssid")    val wifiSsid:       String? = null,
+    @SerializedName("ip")           val ip:             String? = null,
+    @SerializedName("free_heap")    val freeHeap:       Long?   = null
 ) {
     companion object {
         /** Empty state used before first BLE packet is received. */

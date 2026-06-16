@@ -128,6 +128,8 @@ fun MarineDisplay(
     val admin       by viewModel.adminData.collectAsState()
     val rssi        by viewModel.rssi.collectAsState()
 
+    
+
     val freshness   = remember(lastTs) { dataFreshness(lastTs) }
     val quality     = remember(rssi) { rssiToQuality(rssi) }
 

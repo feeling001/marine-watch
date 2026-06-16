@@ -94,6 +94,36 @@ object BleConstants {
         UUID.fromString("4d475743-0302-4e41-5649-474154494f4e")
 
     // ----------------------------------------------------------------
+    // Admin Service
+    // ----------------------------------------------------------------
+
+    /** Admin GATT service UUID */
+    val ADMIN_SERVICE_UUID: UUID =
+        UUID.fromString("4d475743-0005-4e41-5649-474154494f4e")
+
+    /**
+     * AdminData characteristic UUID.
+     * Properties: READ + NOTIFY.
+     * Payload: UTF-8 JSON, updated at 1 Hz.
+     * Fields: uptime_s, datetime_utc, wifi_mode, wifi_ssid, ip, free_heap.
+     */
+    val ADMIN_DATA_CHAR_UUID: UUID =
+        UUID.fromString("4d475743-0501-4e41-5649-474154494f4e")
+
+    /**
+     * AdminCmd characteristic UUID.
+     * Properties: WRITE (no response).
+     * Payload: UTF-8 JSON command.
+     *
+     * Supported commands:
+     *   { "command": "restart" }
+     *   { "command": "wifi_sta", "ssid": "...", "password": "..." }
+     *   { "command": "wifi_ap",  "ssid": "...", "password": "..." }
+     */
+    val ADMIN_CMD_CHAR_UUID: UUID =
+        UUID.fromString("4d475743-0502-4e41-5649-474154494f4e")
+
+    // ----------------------------------------------------------------
     // Standard CCCD descriptor used to enable notifications
     // ----------------------------------------------------------------
 
@@ -115,4 +145,26 @@ object BleConstants {
 
     /** Delay before retrying a failed BLE connection (ms) */
     const val RECONNECT_DELAY_MS = 3_000L
+
+    // ----------------------------------------------------------------
+    // RSSI thresholds (dBm) for signal quality indicator
+    // ----------------------------------------------------------------
+
+    /** RSSI poll interval when connected (ms) */
+    const val RSSI_POLL_INTERVAL_MS = 5_000L
+
+    /** RSSI ≥ this → 5 bars (excellent) */
+    const val RSSI_EXCELLENT = -60
+
+    /** RSSI ≥ this → 4 bars (good) */
+    const val RSSI_GOOD = -70
+
+    /** RSSI ≥ this → 3 bars (fair) */
+    const val RSSI_FAIR = -80
+
+    /** RSSI ≥ this → 2 bars (weak) */
+    const val RSSI_POOR = -90
+
+    /** RSSI below [RSSI_2_BARS] → 1 bar (very weak) */
+    const val RSSI_VERY_POOR  = -100
 }

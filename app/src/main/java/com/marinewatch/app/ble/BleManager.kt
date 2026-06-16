@@ -12,6 +12,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.google.gson.JsonSyntaxException
+import com.marinewatch.app.data.AdminData
 import com.marinewatch.app.data.AutopilotData
 import com.marinewatch.app.data.NavData
 import com.marinewatch.app.data.PerformanceData
@@ -25,10 +26,15 @@ private const val TAG = "MarineWatch.BLE"
 /**
  * Manages the full BLE lifecycle for the Marine Gateway connection:
  *  - Scans for the device by name ([BleConstants.DEVICE_NAME])
- *  - Connects and discovers the Navigation, Wind, Sail Performance and Autopilot GATT services
- *  - Enables NOTIFY on NavData, WindData, PerformanceData and AutopilotData characteristics
+ *  - Connects and discovers the Navigation, Wind, Sail Performance, Autopilot
+ *    and **Admin** GATT services
+ *  - Enables NOTIFY on NavData, WindData, PerformanceData, AutopilotData
+ *    and **AdminData** characteristics
  *  - Parses incoming JSON and exposes state flows
  *  - Writes autopilot commands via the AutopilotCmd characteristic
+ *  - Writes admin commands (restart, wifi_sta, wifi_ap) via the AdminCmd characteristic
+ *  - Polls RSSI every [BleConstants.RSSI_POLL_INTERVAL_MS] when connected and
+ *    exposes the value via [rssi]
  *  - Auto-reconnects on link loss using exponential backoff
  *  - Detects BLE pairing events and exposes them via [connectionState]
  *
@@ -79,9 +85,19 @@ class BleManager(private val context: Context) {
     private val _autopilotData = MutableStateFlow(AutopilotData.EMPTY)
     val autopilotData: StateFlow<AutopilotData> = _autopilotData.asStateFlow()
 
+    private val _adminData = MutableStateFlow(AdminData.EMPTY)
+    val adminData: StateFlow<AdminData> = _adminData.asStateFlow()
+
     /** Timestamp (System.currentTimeMillis) of the last valid NavData packet. */
     private val _lastDataTimestamp = MutableStateFlow(0L)
     val lastDataTimestamp: StateFlow<Long> = _lastDataTimestamp.asStateFlow()
+
+    /**
+     * Last RSSI reading in dBm. Updated every [BleConstants.RSSI_POLL_INTERVAL_MS]
+     * while connected. Null when disconnected.
+     */
+    private val _rssi = MutableStateFlow(0)
+    val rssi: StateFlow<Int> = _rssi.asStateFlow()
 
     // ----------------------------------------------------------------
     // Internal BLE objects
@@ -94,12 +110,14 @@ class BleManager(private val context: Context) {
 
     private var gatt: BluetoothGatt? = null
     private var autopilotCmdChar: BluetoothGattCharacteristic? = null
+    private var adminCmdChar: BluetoothGattCharacteristic? = null
     private var isStarted = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val gson = Gson()
 
     private var pendingReconnectRunnable: Runnable? = null
+    private var rssiPollRunnable: Runnable? = null
 
     /**
      * Tracks CCCD write operations when multiple characteristics need notifications.
@@ -127,32 +145,38 @@ class BleManager(private val context: Context) {
     fun stop() {
         isStarted = false
         cancelPendingReconnect()
+        stopRssiPolling()
         stopScan()
         closeGatt()
         _connectionState.value = BleConnectionState.DISCONNECTED
+        _rssi.value = 0
         Log.i(TAG, "BleManager stopped")
     }
 
     fun disconnect() {
         isStarted = false
         cancelPendingReconnect()
+        stopRssiPolling()
         stopScan()
         if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
             gatt?.disconnect()
         }
         closeGatt()
         _connectionState.value = BleConnectionState.DISCONNECTED
+        _rssi.value = 0
         Log.i(TAG, "Disconnected by user request")
     }
 
     fun reconnect() {
         Log.i(TAG, "Reconnect requested by user — resetting backoff counter")
         cancelPendingReconnect()
+        stopRssiPolling()
         stopScan()
         if (hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
             gatt?.disconnect()
         }
         closeGatt()
+        _rssi.value = 0
         reconnectAttempt = 0
         isStarted = true
         startScan()
@@ -182,27 +206,37 @@ class BleManager(private val context: Context) {
 
         val payload = """{"command":"$command"}""".toByteArray(Charsets.UTF_8)
         Log.i(TAG, "Sending autopilot command: $command")
+        writeCharacteristicRaw(currentGatt, char, payload)
+    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val result = currentGatt.writeCharacteristic(
-                char,
-                payload,
-                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-            )
-            if (result != BluetoothGatt.GATT_SUCCESS) {
-                Log.e(TAG, "writeCharacteristic (API33+) returned error: $result")
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-            @Suppress("DEPRECATION")
-            char.value = payload
-            @Suppress("DEPRECATION")
-            val ok = currentGatt.writeCharacteristic(char)
-            if (!ok) {
-                Log.e(TAG, "writeCharacteristic (legacy) returned false")
-            }
+    /**
+     * Sends an admin command to the Marine Gateway.
+     *
+     * Supported commands:
+     *   - `restart` → { "command": "restart" }
+     *   - `wifi_sta` → { "command": "wifi_sta", "ssid": "...", "password": "..." }
+     *   - `wifi_ap`  → { "command": "wifi_ap",  "ssid": "...", "password": "..." }
+     *
+     * The write is fire-and-forget (WRITE_TYPE_NO_RESPONSE).
+     * The function is a no-op if the GATT connection is not ready.
+     */
+    fun sendAdminCommand(jsonPayload: String): Boolean {
+        val char = adminCmdChar
+        val currentGatt = gatt
+
+        if (char == null || currentGatt == null) {
+            Log.w(TAG, "sendAdminCommand ignored — not connected or AdminCmd char not found")
+            return false
         }
+        if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) {
+            Log.w(TAG, "sendAdminCommand ignored — missing BLUETOOTH_CONNECT permission")
+            return false
+        }
+
+        Log.i(TAG, "Sending admin command: $jsonPayload")
+        writeCharacteristicRaw(currentGatt, char, jsonPayload.toByteArray(Charsets.UTF_8))
+
+        return true
     }
 
     // ----------------------------------------------------------------
@@ -315,6 +349,7 @@ class BleManager(private val context: Context) {
             // Build the sequential CCCD write queue
             cccdQueue.clear()
             autopilotCmdChar = null
+            adminCmdChar = null
 
             // ── Navigation service ──────────────────────────────────────────
             val navService = gatt.getService(BleConstants.NAV_SERVICE_UUID)
@@ -394,6 +429,30 @@ class BleManager(private val context: Context) {
                 Log.w(TAG, "Autopilot service not found — autopilot unavailable")
             }
 
+            // ── Admin service (optional — graceful if absent) ───────────────
+            val adminService = gatt.getService(BleConstants.ADMIN_SERVICE_UUID)
+            if (adminService != null) {
+                val adminDataChar = adminService.getCharacteristic(BleConstants.ADMIN_DATA_CHAR_UUID)
+                if (adminDataChar != null) {
+                    gatt.setCharacteristicNotification(adminDataChar, true)
+                    adminDataChar.getDescriptor(BleConstants.CCCD_UUID)?.let {
+                        cccdQueue.addLast(adminDataChar to it)
+                    } ?: Log.w(TAG, "AdminData CCCD descriptor not found")
+                } else {
+                    Log.w(TAG, "AdminData characteristic not found")
+                }
+
+                val adminCmd = adminService.getCharacteristic(BleConstants.ADMIN_CMD_CHAR_UUID)
+                if (adminCmd != null) {
+                    adminCmdChar = adminCmd
+                    Log.i(TAG, "AdminCmd characteristic ready")
+                } else {
+                    Log.w(TAG, "AdminCmd characteristic not found — admin commands unavailable")
+                }
+            } else {
+                Log.w(TAG, "Admin service not found — admin features unavailable")
+            }
+
             // Kick off the sequential CCCD write chain
             writeNextCccd(gatt)
         }
@@ -431,6 +490,15 @@ class BleManager(private val context: Context) {
         ) {
             dispatchCharacteristicValue(characteristic.uuid, value)
         }
+
+        override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d(TAG, "RSSI: $rssi dBm")
+                _rssi.value = rssi
+            } else {
+                Log.w(TAG, "Failed to read RSSI: status=$status")
+            }
+        }
     }
 
     // ----------------------------------------------------------------
@@ -443,6 +511,7 @@ class BleManager(private val context: Context) {
         if (next == null) {
             Log.i(TAG, "All CCCD writes complete — CONNECTED")
             _connectionState.value = BleConnectionState.CONNECTED
+            startRssiPolling()
             return
         }
         val (_, descriptor) = next
@@ -460,6 +529,7 @@ class BleManager(private val context: Context) {
             BleConstants.WIND_DATA_CHAR_UUID      -> parseWindData(value)
             BleConstants.PERF_DATA_CHAR_UUID      -> parsePerfData(value)
             BleConstants.AUTOPILOT_DATA_CHAR_UUID -> parseAutopilotData(value)
+            BleConstants.ADMIN_DATA_CHAR_UUID     -> parseAdminData(value)
         }
     }
 
@@ -477,6 +547,35 @@ class BleManager(private val context: Context) {
         } else {
             descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             gatt.writeDescriptor(descriptor)
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Generic characteristic write helper (WRITE_NO_RESPONSE)
+    // ----------------------------------------------------------------
+
+    @Suppress("DEPRECATION")
+    private fun writeCharacteristicRaw(
+        gatt: BluetoothGatt,
+        char: BluetoothGattCharacteristic,
+        payload: ByteArray
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val result = gatt.writeCharacteristic(
+                char,
+                payload,
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            )
+            if (result != BluetoothGatt.GATT_SUCCESS) {
+                Log.e(TAG, "writeCharacteristic (API33+) returned error: $result")
+            }
+        } else {
+            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            char.value = payload
+            val ok = gatt.writeCharacteristic(char)
+            if (!ok) {
+                Log.e(TAG, "writeCharacteristic (legacy) returned false")
+            }
         }
     }
 
@@ -520,6 +619,37 @@ class BleManager(private val context: Context) {
                 }
             }
         }
+
+    // ----------------------------------------------------------------
+    // RSSI polling
+    // ----------------------------------------------------------------
+
+    private fun startRssiPolling() {
+        stopRssiPolling()
+        val runnable = object : Runnable {
+            override fun run() {
+                val currentGatt = gatt
+                if (currentGatt != null &&
+                    _connectionState.value == BleConnectionState.CONNECTED &&
+                    hasPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                ) {
+                    currentGatt.readRemoteRssi()
+                    mainHandler.postDelayed(this, BleConstants.RSSI_POLL_INTERVAL_MS)
+                }
+            }
+        }
+        rssiPollRunnable = runnable
+        mainHandler.postDelayed(runnable, BleConstants.RSSI_POLL_INTERVAL_MS)
+        Log.d(TAG, "RSSI polling started")
+    }
+
+    private fun stopRssiPolling() {
+        rssiPollRunnable?.let {
+            mainHandler.removeCallbacks(it)
+            rssiPollRunnable = null
+            Log.d(TAG, "RSSI polling stopped")
+        }
+    }
 
     // ----------------------------------------------------------------
     // JSON parsing
@@ -578,6 +708,19 @@ class BleManager(private val context: Context) {
         }
     }
 
+    private fun parseAdminData(bytes: ByteArray) {
+        val json = bytes.toString(Charsets.UTF_8)
+        Log.d(TAG, "AdminData received: ${bytes.size} bytes → $json")
+        try {
+            val data = gson.fromJson(json, AdminData::class.java)
+            _adminData.value = data
+            Log.d(TAG, "AdminData parsed OK: uptime=${data.uptimeS}s ip=${data.ip} wifi=${data.wifiMode}/${data.wifiSsid}")
+        } catch (e: JsonSyntaxException) {
+            Log.e(TAG, "AdminData JSON parse error (${bytes.size} bytes): ${e.message}")
+            Log.e(TAG, "Raw bytes (hex): ${bytes.joinToString(" ") { "%02X".format(it) }}")
+        }
+    }
+
     // ----------------------------------------------------------------
     // Reconnection with exponential backoff
     // ----------------------------------------------------------------
@@ -627,6 +770,9 @@ class BleManager(private val context: Context) {
     private fun cleanupGatt() {
         cccdQueue.clear()
         autopilotCmdChar = null
+        adminCmdChar = null
+        stopRssiPolling()
+        _rssi.value = 0
         closeGatt()
         _connectionState.value = BleConnectionState.RECONNECTING
     }
