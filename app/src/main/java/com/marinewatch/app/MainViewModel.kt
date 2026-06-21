@@ -47,7 +47,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val connectionState:   StateFlow<BleConnectionState> = bleManager.connectionState
     val navData:           StateFlow<NavData>             = bleManager.navData
-    val windData:          StateFlow<WindData>            = bleManager.windData   // ← ajout
+    val windData:          StateFlow<WindData>            = bleManager.windData  
     val perfData:          StateFlow<PerformanceData>     = bleManager.perfData
     val autopilotData:     StateFlow<AutopilotData>       = bleManager.autopilotData
     val lastDataTimestamp: StateFlow<Long>                = bleManager.lastDataTimestamp
